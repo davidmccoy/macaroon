@@ -21,7 +21,7 @@ impl TrayManager {
     }
 
     /// Initialize the system tray
-    pub fn setup<R: Runtime>(app: &AppHandle<R>, _state: SharedState) -> Result<()> {
+    pub fn setup<R: Runtime>(app: &AppHandle<R>, state: SharedState) -> Result<()> {
         // Create menu items
         let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
         let menu = Menu::with_items(app, &[&quit_item])?;
@@ -56,6 +56,9 @@ impl TrayManager {
         // Store tray in app state for later updates
         app.manage(tray);
 
+        // Store shared state for Phase 2 sidecar integration
+        app.manage(state);
+
         Ok(())
     }
 
@@ -88,7 +91,11 @@ impl TrayManager {
                     track.artwork.as_deref(),
                     &track.title,
                     &track.artist,
-                )?;
+                ).unwrap_or_else(|e| {
+                    log::error!("Failed to create icon: {}, using fallback", e);
+                    manager.create_fallback_icon()
+                        .expect("Fallback icon creation should never fail")
+                });
 
                 let image = Image::from_bytes(&icon_bytes)
                     .context("Failed to create image from bytes")?;
@@ -111,6 +118,16 @@ impl TrayManager {
         Ok(())
     }
 
+    /// Create a fallback icon when normal icon generation fails
+    fn create_fallback_icon(&self) -> Result<Vec<u8>> {
+        // Create minimal icon with music note symbol
+        self.compositor.create_menu_bar_icon(
+            None,
+            "♪",  // Music note symbol
+            "",
+        )
+    }
+
     /// Update icon with test data (for Phase 0 development)
     pub fn update_test_icon<R: Runtime>(
         app: &AppHandle<R>,
@@ -123,7 +140,11 @@ impl TrayManager {
             None,
             title,
             artist,
-        )?;
+        ).unwrap_or_else(|e| {
+            log::error!("Failed to create test icon: {}, using fallback", e);
+            manager.create_fallback_icon()
+                .expect("Fallback icon creation should never fail")
+        });
 
         let image = Image::from_bytes(&icon_bytes)
             .context("Failed to create image from bytes")?;

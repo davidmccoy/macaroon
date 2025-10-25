@@ -3,9 +3,49 @@ use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
 use ab_glyph::{FontRef, PxScale};
 
-// Embed a basic font (we'll use a simple fallback for now)
-// In production, we'd embed SF Pro or another high-quality font
-const FONT_DATA: &[u8] = include_bytes!("../assets/fonts/Roboto-Regular.ttf");
+/// Detect if macOS is in dark mode using defaults command (safer than Cocoa APIs)
+#[cfg(target_os = "macos")]
+fn is_dark_mode() -> bool {
+    use std::process::Command;
+
+    // Use the `defaults read` command to check system appearance
+    // This is safer than calling Cocoa APIs directly
+    match Command::new("defaults")
+        .args(&["read", "-g", "AppleInterfaceStyle"])
+        .output()
+    {
+        Ok(output) => {
+            let result = String::from_utf8_lossy(&output.stdout);
+            let is_dark = result.trim() == "Dark";
+            log::debug!("Dark mode detection (via defaults): {}", is_dark);
+            is_dark
+        }
+        Err(e) => {
+            // If the command fails (e.g., key doesn't exist in light mode), assume light mode
+            log::debug!("Dark mode detection failed: {}, assuming light mode", e);
+            false
+        }
+    }
+}
+
+/// Default to light mode on non-macOS platforms
+#[cfg(not(target_os = "macos"))]
+fn is_dark_mode() -> bool {
+    false
+}
+
+/// Get appropriate text color based on system appearance
+fn get_text_color() -> Rgba<u8> {
+    if is_dark_mode() {
+        Rgba([255, 255, 255, 255]) // White text for dark mode
+    } else {
+        Rgba([0, 0, 0, 255]) // Black text for light mode
+    }
+}
+
+// Embed Helvetica Neue for native macOS appearance
+// Using system font collection (.ttc) for better menu bar matching
+const FONT_DATA: &[u8] = include_bytes!("../assets/fonts/HelveticaNeue.ttc");
 
 pub struct Compositor {
     font: FontRef<'static>,
@@ -13,8 +53,9 @@ pub struct Compositor {
 
 impl Compositor {
     pub fn new() -> Result<Self> {
+        // HelveticaNeue.ttc is a font collection - use index 0 for regular weight
         let font = FontRef::try_from_slice(FONT_DATA)
-            .context("Failed to load embedded font")?;
+            .context("Failed to load embedded Helvetica Neue font")?;
 
         Ok(Self { font })
     }
@@ -59,13 +100,15 @@ impl Compositor {
         let available_width = (CANVAS_WIDTH - TEXT_X_OFFSET as u32 - (5 * SCALE_FACTOR)) as i32;
         let display_text = self.truncate_text(&text, available_width);
 
-        // Draw text at 2x scale for Retina - slightly smaller than before (24px instead of 26px at 1x = 48px at 2x)
-        let scale = PxScale::from(48.0);
-        let text_color = Rgba([255, 255, 255, 255]); // White text
+        // Draw text at 2x scale for Retina
+        // 42px at 2x scale = 21px at 1x - balances readability with menu bar appearance
+        let scale = PxScale::from(42.0);
 
-        // Center text vertically in the 44px tall canvas (22px * 2)
-        // Moving up to prevent descenders from being cut off
-        let text_y = -3;
+        // Get text color based on macOS appearance (dark/light mode)
+        let text_color = get_text_color();
+
+        // Position text vertically - adjusted for Helvetica Neue
+        let text_y = 1;
 
         draw_text_mut(
             &mut canvas,
@@ -127,7 +170,8 @@ impl Compositor {
 
     /// Truncate text to fit within available width
     fn truncate_text(&self, text: &str, max_width: i32) -> String {
-        let scale = PxScale::from(48.0);
+        // Use same scale as rendering (42px at 2x = 21px at 1x)
+        let scale = PxScale::from(42.0);
 
         // Measure full text width
         let full_width = self.measure_text_width(text, scale);
