@@ -2,11 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod compositor;
+mod sidecar;
 mod state;
 mod tray;
 mod types;
 
-use std::time::Duration;
+use tauri::Manager;
 
 fn main() {
     // Initialize logger
@@ -28,50 +29,20 @@ fn main() {
 
             log::info!("System tray initialized");
 
-            // For Phase 0: Simulate updating the tray with test data
-            let app_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                log::info!("Starting test update loop");
-
-                // Wait a bit for the UI to initialize
-                tokio::time::sleep(Duration::from_secs(2)).await;
-
-                // Test 1: Short title
-                log::info!("Test 1: Short title");
-                if let Err(e) = tray::TrayManager::update_test_icon(
-                    &app_handle,
-                    "Bohemian Rhapsody",
-                    "Queen",
-                ) {
-                    log::error!("Failed to update icon: {}", e);
+            // Spawn sidecar process
+            let mut sidecar_manager = sidecar::SidecarManager::new();
+            match sidecar_manager.spawn(app.handle(), state.clone()) {
+                Ok(_) => {
+                    log::info!("Sidecar spawned successfully");
                 }
-
-                tokio::time::sleep(Duration::from_secs(5)).await;
-
-                // Test 2: Very long title to test truncation
-                log::info!("Test 2: Long title (truncation test)");
-                if let Err(e) = tray::TrayManager::update_test_icon(
-                    &app_handle,
-                    "This Is A Very Long Song Title That Should Definitely Be Truncated",
-                    "Artist With An Extremely Long Name",
-                ) {
-                    log::error!("Failed to update icon: {}", e);
+                Err(e) => {
+                    log::error!("Failed to spawn sidecar: {}", e);
+                    // Continue running even if sidecar fails
                 }
+            }
 
-                tokio::time::sleep(Duration::from_secs(5)).await;
-
-                // Test 3: Another song
-                log::info!("Test 3: Another track");
-                if let Err(e) = tray::TrayManager::update_test_icon(
-                    &app_handle,
-                    "Stairway to Heaven",
-                    "Led Zeppelin",
-                ) {
-                    log::error!("Failed to update icon: {}", e);
-                }
-
-                log::info!("Test updates complete");
-            });
+            // Store sidecar manager in app state for cleanup
+            app.manage(sidecar_manager);
 
             Ok(())
         })

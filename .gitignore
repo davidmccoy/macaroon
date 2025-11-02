@@ -6,6 +6,7 @@ yarn-error.log*
 # Tauri
 src-tauri/target/
 src-tauri/Cargo.lock
+src-tauri/binaries/
 
 # Sidecar
 sidecar/build/
@@ -23,5 +24,7 @@ sidecar/node_modules/
 # Logs
 *.log
 
-# Plans
-PLAN.md
+# Documentation - ignore all markdown except READMEs
+*.md
+!README.md
+!**/README.md

@@ -1,0 +1,22 @@
+{
+  "name": "roon-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js sidecar for Roon API integration",
+  "scripts": {
+    "dev": "tsc --watch",
+    "build": "tsc",
+    "start": "node build/index.js",
+    "bundle": "npm run build && pkg build/index.js --targets node18-macos-arm64 --output ../src-tauri/binaries/roon-sidecar-aarch64-apple-darwin"
+  },
+  "dependencies": {
+    "node-roon-api": "github:roonlabs/node-roon-api",
+    "node-roon-api-transport": "github:roonlabs/node-roon-api-transport",
+    "node-roon-api-image": "github:roonlabs/node-roon-api-image"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^20.0.0",
+    "pkg": "^5.8.0"
+  }
+}

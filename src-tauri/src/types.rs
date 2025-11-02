@@ -1,5 +1,25 @@
 use serde::{Deserialize, Serialize};
 
+/// Sidecar message types - these match the JSON output from the Node.js sidecar
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SidecarMessage {
+    NowPlaying {
+        title: String,
+        artist: String,
+        album: String,
+        state: PlaybackState,
+        artwork: Option<String>,
+    },
+    Status {
+        state: String,
+        message: Option<String>,
+    },
+    Error {
+        message: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NowPlayingData {
     pub title: String,
