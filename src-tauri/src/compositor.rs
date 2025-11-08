@@ -94,34 +94,37 @@ impl Compositor {
             self.draw_placeholder_art(&mut canvas, ALBUM_ART_SIZE);
         }
 
-        // Prepare text: "Title - Artist"
-        let text = format!("{} - {}", title, artist);
-        let available_width = (CANVAS_WIDTH - TEXT_X_OFFSET as u32 - (5 * SCALE_FACTOR)) as i32;
-        let display_text = self.truncate_text(&text, available_width);
+        // Only draw text if we have title or artist
+        if !title.is_empty() || !artist.is_empty() {
+            // Prepare text: "Title - Artist"
+            let text = format!("{} - {}", title, artist);
+            let available_width = (CANVAS_WIDTH - TEXT_X_OFFSET as u32 - (5 * SCALE_FACTOR)) as i32;
+            let display_text = self.truncate_text(&text, available_width);
 
-        // Draw text at 2x scale for Retina
-        // 42px at 2x = 21px at 1x - matching original Helvetica Neue size
-        let scale = PxScale::from(42.0);
+            // Draw text at 2x scale for Retina
+            // 42px at 2x = 21px at 1x - matching original Helvetica Neue size
+            let scale = PxScale::from(42.0);
 
-        // Get text color based on macOS appearance (dark/light mode)
-        let text_color = get_text_color();
+            // Get text color based on macOS appearance (dark/light mode)
+            let text_color = get_text_color();
 
-        // Position text vertically - adjusted for SF Compact metrics
-        let text_y = 1;
+            // Position text vertically - adjusted for SF Compact metrics
+            let text_y = 1;
 
-        // Load font for rendering
-        let font = FontRef::try_from_slice(&self.font)
-            .context("Failed to parse font data")?;
+            // Load font for rendering
+            let font = FontRef::try_from_slice(&self.font)
+                .context("Failed to parse font data")?;
 
-        draw_text_mut(
-            &mut canvas,
-            text_color,
-            TEXT_X_OFFSET,
-            text_y,
-            scale,
-            &font,
-            &display_text,
-        );
+            draw_text_mut(
+                &mut canvas,
+                text_color,
+                TEXT_X_OFFSET,
+                text_y,
+                scale,
+                &font,
+                &display_text,
+            );
+        }
 
         // Encode as PNG
         self.encode_png(&canvas)

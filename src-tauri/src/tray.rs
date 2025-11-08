@@ -85,32 +85,47 @@ impl TrayManager {
         let state_guard = state.blocking_read();
 
         if let Some(track) = &state_guard.current_track {
-            // Only show icon when playing
-            if track.state == PlaybackState::Playing || track.state == PlaybackState::Paused {
-                let icon_bytes = manager.compositor.create_menu_bar_icon(
-                    track.artwork.as_deref(),
-                    &track.title,
-                    &track.artist,
-                ).unwrap_or_else(|e| {
-                    log::error!("Failed to create icon: {}, using fallback", e);
-                    manager.create_fallback_icon()
-                        .expect("Fallback icon creation should never fail")
-                });
+            match track.state {
+                PlaybackState::Playing => {
+                    // Show track info with artwork when playing
+                    let icon_bytes = manager.compositor.create_menu_bar_icon(
+                        track.artwork.as_deref(),
+                        &track.title,
+                        &track.artist,
+                    ).unwrap_or_else(|e| {
+                        log::error!("Failed to create icon: {}, using fallback", e);
+                        manager.create_fallback_icon()
+                            .expect("Fallback icon creation should never fail")
+                    });
 
-                let image = Image::from_bytes(&icon_bytes)
-                    .context("Failed to create image from bytes")?;
+                    let image = Image::from_bytes(&icon_bytes)
+                        .context("Failed to create image from bytes")?;
 
-                // Get tray and update icon
-                if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
-                    tray.set_icon(Some(image))?;
+                    if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
+                        tray.set_icon(Some(image))?;
+                    }
                 }
-            } else {
-                // Hide tray when stopped
-                if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
-                    // For now, just use a minimal icon
-                    // In the future, we can hide the tray entirely
-                    let minimal_icon = manager.create_initial_icon()?;
-                    tray.set_icon(Some(minimal_icon))?;
+                PlaybackState::Paused => {
+                    // Show just placeholder image with no text when paused
+                    let icon_bytes = manager.compositor.create_menu_bar_icon(
+                        None,  // No artwork - will show purple placeholder
+                        "",    // No title
+                        "",    // No artist
+                    ).unwrap_or_else(|e| {
+                        log::error!("Failed to create paused icon: {}, using fallback", e);
+                        manager.create_fallback_icon()
+                            .expect("Fallback icon creation should never fail")
+                    });
+
+                    let image = Image::from_bytes(&icon_bytes)
+                        .context("Failed to create image from bytes")?;
+
+                    if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
+                        tray.set_icon(Some(image))?;
+                    }
+                }
+                PlaybackState::Stopped => {
+                    // Don't update icon when stopped
                 }
             }
         }
