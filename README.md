@@ -1,154 +1,235 @@
 # Now Playing - macOS Menu Bar App
 
-A Tauri-based macOS menu bar application that displays currently playing music from Roon.
+A macOS menu bar application that displays currently playing music from [Roon](https://roonlabs.com/) in your menu bar. Built with [Tauri](https://tauri.app/) (Rust) and Node.js.
 
-## Phase 0: Proof of Concept - COMPLETE ✅
+![License](https://img.shields.io/badge/license-TBD-blue)
+![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 
-The basic infrastructure is now in place:
+## Features
 
-- ✅ Tauri project structure with system tray support
-- ✅ Image compositor with album art and text rendering
-- ✅ Embedded Roboto font for text display
-- ✅ Menu bar icon generation (250x22px with album art + text)
-- ✅ Text truncation for long titles
-- ✅ Test data simulation
+- **Real-time Display**: Shows currently playing track information (title, artist, album) directly in your macOS menu bar
+- **Album Artwork**: Displays album art thumbnail alongside track information
+- **Automatic Discovery**: Automatically discovers and connects to Roon Core on your network
+- **Manual Connection**: Supports direct connection to Roon Core via environment variables
+- **System Integration**: Adapts text color based on macOS appearance (dark/light mode)
+- **Retina Support**: High-resolution rendering for crisp text and images on Retina displays
 
-## Project Status
+## How It Works
 
-**Current Phase:** Phase 0 Complete - Static Icon Proof of Concept
-**Next Phase:** Phase 1 - Node.js Sidecar with Roon API Integration
+The application consists of two components:
 
-## Development Setup
+1. **Tauri App (Rust)**: Manages the macOS menu bar icon and renders the display
 
-### Prerequisites
+   - Image compositor with album art and text rendering
+   - System tray integration
+   - Helvetica Neue font for native macOS appearance
+   - Automatic dark/light mode detection
 
-- ✅ Rust 1.90.0+ (installed)
-- ✅ Node.js 20.18.0 (installed)
-- ✅ Xcode Command Line Tools (installed)
-- ✅ Homebrew (installed)
+2. **Node.js Sidecar**: Connects to Roon Core and streams playback data
+   - Roon API integration for real-time updates
+   - Auto-discovery of Roon Core on local network
+   - Album artwork fetching and encoding
+   - JSON-based communication with Rust app
 
-### Running the App
+## Prerequisites
+
+- macOS 10.15 (Catalina) or later
+- [Roon Core](https://roonlabs.com/) running on your network
+- Rust 1.90.0+ (for building from source)
+- Node.js 20.18.0+ (for building from source)
+- Xcode Command Line Tools
+
+## Installation
+
+### From Source
+
+1. Clone the repository:
 
 ```bash
-# Development mode (with hot reload for Rust changes)
-npm run dev
+git clone https://github.com/yourusername/now-playing.git
+cd now-playing
+```
 
-# Build for production
+2. Install dependencies:
+
+```bash
+npm install
+cd sidecar && npm install && cd ..
+```
+
+3. Build the sidecar:
+
+```bash
+cd sidecar && npm run build && cd ..
+```
+
+4. Run in development mode:
+
+```bash
+npm run dev
+```
+
+5. Build for production:
+
+```bash
 npm run build
 ```
 
-### Testing Phase 0
+The built application will be in `src-tauri/target/release/bundle/`.
 
-When you run `npm run dev`, the app will:
+## Usage
 
-1. Create a menu bar icon (look in the top-right of your Mac's menu bar)
-2. Display test data that cycles through different songs every 5 seconds:
-   - "Bohemian Rhapsody - Queen"
-   - "This Is A Very Long Song Title..." (tests truncation)
-   - "Stairway to Heaven - Led Zeppelin"
+### First Run
 
-### Project Structure
+1. Launch the application
+2. Look for the menu bar icon in the top-right corner of your screen
+3. The app will automatically search for Roon Core on your network
+4. When found, you'll need to authorize the extension in Roon:
+   - Open Roon
+   - Go to Settings → Extensions
+   - Find "Now Playing Menu Bar" and click "Enable"
+
+Once authorized, the menu bar will display your currently playing track.
+
+### Manual Connection
+
+If auto-discovery doesn't work, you can manually specify your Roon Core address:
+
+```bash
+ROON_HOST=192.168.1.100 npm run dev
+```
+
+Or for a built app:
+
+```bash
+ROON_HOST=192.168.1.100 ROON_PORT=9100 /path/to/Now\ Playing.app/Contents/MacOS/Now\ Playing
+```
+
+### Menu Bar Display
+
+The menu bar shows:
+
+- Album artwork (22x22px thumbnail)
+- Track title and artist name
+- Automatically truncates long titles with ellipsis
+- Updates in real-time as tracks change
+
+## Project Structure
 
 ```
 now-playing/
-├── src-tauri/              # Rust backend
+├── src-tauri/              # Rust/Tauri application
 │   ├── src/
-│   │   ├── main.rs         # Entry point with test simulation
+│   │   ├── main.rs         # Application entry point
 │   │   ├── compositor.rs   # Image generation & text rendering
+│   │   ├── sidecar.rs      # Node.js sidecar process management
 │   │   ├── tray.rs         # System tray management
-│   │   ├── state.rs        # App state management
+│   │   ├── state.rs        # Application state
 │   │   └── types.rs        # Data types
 │   ├── assets/
 │   │   └── fonts/
-│   │       └── Roboto-Regular.ttf
-│   ├── icons/              # App icons
-│   └── Cargo.toml          # Rust dependencies
-├── package.json
-└── RUST_PLAN.md           # Full implementation plan
+│   │       └── HelveticaNeue.ttc  # System font for native appearance
+│   └── icons/              # Application icons
+├── sidecar/                # Node.js Roon API integration
+│   ├── src/
+│   │   ├── index.ts        # Sidecar entry point
+│   │   ├── output.ts       # JSON output formatting
+│   │   └── roon/
+│   │       ├── client.ts   # Roon API client
+│   │       ├── transport.ts # Transport/playback management
+│   │       └── image.ts    # Album artwork handling
+│   └── package.json
+└── package.json
 ```
 
-## Features Implemented (Phase 0)
-
-### Image Compositor
-
-The compositor (`src-tauri/src/compositor.rs`) can:
-
-- Generate 250x22px menu bar icons
-- Render album artwork (22x22px) or purple placeholder
-- Draw text with Roboto font at 14px
-- Intelligently truncate long text with ellipsis
-- Output PNG bytes for the menu bar
-
-### System Tray
-
-The tray manager (`src-tauri/src/tray.rs`):
-
-- Creates a system tray icon in the macOS menu bar
-- Updates the icon dynamically with new track data
-- Provides a "Quit" menu option
-- Handles click events (prepared for future popover window)
-
-### Test Simulation
-
-The main app (`src-tauri/src/main.rs`) currently:
-
-- Initializes logging for debugging
-- Sets up the system tray
-- Runs a test loop that cycles through different tracks
-- Demonstrates icon updates and text truncation
-
-## Next Steps - Phase 1
-
-To implement Phase 1 (Roon API Integration), we need to:
-
-1. Create the Node.js sidecar project in `./sidecar/`
-2. Install Roon API dependencies
-3. Implement Roon client with auto-discovery
-4. Set up zone subscription for real-time updates
-5. Fetch album artwork and convert to base64
-6. Connect Rust to sidecar via stdout/stdin
-
-## Troubleshooting
-
-### App doesn't appear in menu bar
-
-- Check the logs in the terminal when running `npm run dev`
-- Look for errors in the Rust compilation
-- Make sure the icon file exists at `src-tauri/icons/icon.png`
-
-### Text looks wrong
-
-- The current implementation uses Roboto font
-- For production, we'd use SF Pro (macOS system font)
-- Text is white by default (works in dark mode)
-
-### Icon not updating
-
-- Check logs for image generation errors
-- Verify the compositor is being called successfully
-
 ## Technical Details
+
+### Architecture
+
+The application uses a **sidecar architecture** where:
+
+- The Rust app manages the UI and system integration
+- The Node.js sidecar handles Roon API communication
+- Communication happens via stdout/stdin using JSON messages
 
 ### Dependencies
 
 **Rust:**
-- `tauri 2.0` - Core framework with tray support
+
+- `tauri 2.0` - Application framework with system tray support
 - `image 0.25` - Image manipulation
 - `imageproc 0.25` - Drawing primitives
 - `ab_glyph 0.2` - Font rendering
 - `tokio 1.0` - Async runtime
 
 **Node.js:**
-- None yet (Phase 1 will add Roon API dependencies)
+
+- `node-roon-api` - Roon Core discovery and connection
+- `node-roon-api-transport` - Playback state monitoring
+- `node-roon-api-image` - Album artwork fetching
 
 ### Performance
 
-Current performance (Phase 0 with test data):
+- **Memory usage**: ~80 MB idle
+- **CPU usage**: <1% during normal operation
+- **Icon generation**: <10ms per update
+- **Network**: Minimal bandwidth (only metadata and small album art thumbnails)
 
-- **Build time:** ~5 seconds (debug)
-- **Memory usage:** ~80 MB idle
-- **CPU usage:** <1% during icon updates
-- **Icon generation:** <10ms per update
+## Development
+
+### Running Tests
+
+```bash
+npm test
+```
+
+### Building the Sidecar
+
+```bash
+npm run build:sidecar
+```
+
+This creates a standalone binary that's bundled with the Tauri app.
+
+### Debugging
+
+Enable verbose logging:
+
+```bash
+RUST_LOG=debug npm run dev
+```
+
+The sidecar logs to stderr, which is captured and displayed by the Rust app.
+
+## Troubleshooting
+
+### App doesn't appear in menu bar
+
+- Check terminal output for errors
+- Ensure Roon Core is running and accessible
+- Verify the sidecar built successfully (`sidecar/build/index.js` exists)
+
+### Can't connect to Roon Core
+
+- Ensure Roon Core is on the same network
+- Check firewall settings (Roon uses port 9100)
+- Try manual connection with `ROON_HOST` environment variable
+- Verify the extension is enabled in Roon Settings → Extensions
+
+### No album artwork
+
+- Album artwork requires the Roon API Image service
+- Some tracks may not have artwork available
+- A purple placeholder square is shown when artwork is unavailable
+
+### Text color issues
+
+- The app automatically detects macOS appearance mode
+- If text is hard to read, check System Preferences → General → Appearance
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
@@ -157,5 +238,10 @@ TBD
 ## Acknowledgments
 
 - Built with [Tauri](https://tauri.app/)
-- Uses [Roon API](https://github.com/RoonLabs/node-roon-api) (Phase 1)
-- Font: [Roboto](https://fonts.google.com/specimen/Roboto)
+- Uses [Roon API](https://github.com/RoonLabs/node-roon-api)
+- Font: Helvetica Neue (macOS system font)
+
+## Related Projects
+
+- [Roon Labs](https://roonlabs.com/) - The music player this integrates with
+- [Roon API Documentation](https://github.com/RoonLabs/node-roon-api)
