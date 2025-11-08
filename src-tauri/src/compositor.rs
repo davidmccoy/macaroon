@@ -43,21 +43,20 @@ fn get_text_color() -> Rgba<u8> {
     }
 }
 
-// Embed Helvetica Neue for native macOS appearance
-// Using system font collection (.ttc) for better menu bar matching
-const FONT_DATA: &[u8] = include_bytes!("../assets/fonts/HelveticaNeue.ttc");
-
 pub struct Compositor {
-    font: FontRef<'static>,
+    font: Vec<u8>,
 }
 
 impl Compositor {
     pub fn new() -> Result<Self> {
-        // HelveticaNeue.ttc is a font collection - use index 0 for regular weight
-        let font = FontRef::try_from_slice(FONT_DATA)
-            .context("Failed to load embedded Helvetica Neue font")?;
+        // Load SF Pro Text (macOS native system font) from system font directory
+        // SF Pro is the standard system font for macOS since macOS 10.11
+        let font_path = "/System/Library/Fonts/SFNS.ttf";
 
-        Ok(Self { font })
+        let font_data = std::fs::read(font_path)
+            .context("Failed to load SF Pro system font. Ensure running on macOS.")?;
+
+        Ok(Self { font: font_data })
     }
 
     /// Create a menu bar icon with album art and text
@@ -101,14 +100,18 @@ impl Compositor {
         let display_text = self.truncate_text(&text, available_width);
 
         // Draw text at 2x scale for Retina
-        // 42px at 2x scale = 21px at 1x - balances readability with menu bar appearance
+        // 42px at 2x = 21px at 1x - matching original Helvetica Neue size
         let scale = PxScale::from(42.0);
 
         // Get text color based on macOS appearance (dark/light mode)
         let text_color = get_text_color();
 
-        // Position text vertically - adjusted for Helvetica Neue
+        // Position text vertically - adjusted for SF Compact metrics
         let text_y = 1;
+
+        // Load font for rendering
+        let font = FontRef::try_from_slice(&self.font)
+            .context("Failed to parse font data")?;
 
         draw_text_mut(
             &mut canvas,
@@ -116,7 +119,7 @@ impl Compositor {
             TEXT_X_OFFSET,
             text_y,
             scale,
-            &self.font,
+            &font,
             &display_text,
         );
 
@@ -203,11 +206,17 @@ impl Compositor {
     fn measure_text_width(&self, text: &str, scale: PxScale) -> f32 {
         use ab_glyph::{Font, ScaleFont};
 
-        let scaled_font = self.font.as_scaled(scale);
+        // Parse font for measurement
+        let font = match FontRef::try_from_slice(&self.font) {
+            Ok(f) => f,
+            Err(_) => return 0.0,
+        };
+
+        let scaled_font = font.as_scaled(scale);
         let mut width = 0.0;
 
         for ch in text.chars() {
-            let glyph_id = self.font.glyph_id(ch);
+            let glyph_id = font.glyph_id(ch);
             width += scaled_font.h_advance(glyph_id);
         }
 

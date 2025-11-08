@@ -28,3 +28,5 @@ sidecar/node_modules/
 *.md
 !README.md
 !**/README.md
+
+.env
