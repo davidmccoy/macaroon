@@ -41,6 +41,17 @@ fn main() {
                 }
             }
 
+            // Setup signal handler for Ctrl+C (SIGINT) and SIGTERM
+            let sidecar_for_signal = sidecar_manager.clone();
+            ctrlc::set_handler(move || {
+                log::info!("Received interrupt signal (Ctrl+C), cleaning up sidecar...");
+                if let Err(e) = sidecar_for_signal.stop() {
+                    log::error!("Error stopping sidecar on interrupt: {}", e);
+                }
+                std::process::exit(0);
+            })
+            .expect("Failed to set Ctrl+C handler");
+
             // Store sidecar manager in app state for cleanup
             app.manage(sidecar_manager);
 

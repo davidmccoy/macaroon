@@ -11,6 +11,7 @@ use crate::tray::TrayManager;
 use crate::types::{ConnectionStatus, NowPlayingData, SidecarMessage};
 
 /// Manages the Node.js sidecar process
+#[derive(Clone)]
 pub struct SidecarManager {
     child: Arc<Mutex<Option<Child>>>,
 }
