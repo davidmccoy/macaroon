@@ -291,30 +291,60 @@ impl SidecarManager {
     /// Stop the sidecar process
     pub fn stop(&mut self) -> Result<()> {
         if let Some(mut child) = self.child.take() {
-            log::info!("Stopping sidecar process...");
+            log::info!("Stopping sidecar process with PID {}...", child.id());
 
-            // Just use kill() - Rust's Child::kill() will handle it appropriately
-            // On Unix it sends SIGKILL, but for our purposes this is fine
+            // Send SIGTERM for graceful shutdown
+            #[cfg(unix)]
+            {
+                use std::process::Command;
+                let pid = child.id();
+                log::info!("Sending SIGTERM to sidecar process {}", pid);
 
-            // Wait a bit for graceful shutdown
-            thread::sleep(Duration::from_millis(500));
+                // Use kill command to send SIGTERM
+                // This is more portable than using libc directly
+                let _ = Command::new("kill")
+                    .arg("-TERM")
+                    .arg(pid.to_string())
+                    .output();
+            }
 
-            // Force kill if still running
-            match child.try_wait() {
-                Ok(Some(_)) => {
-                    log::info!("Sidecar process stopped gracefully");
-                }
-                Ok(None) => {
-                    log::warn!("Sidecar didn't stop gracefully, killing...");
-                    child.kill().context("Failed to kill sidecar process")?;
-                    child.wait().context("Failed to wait for sidecar process")?;
-                    log::info!("Sidecar process killed");
-                }
-                Err(e) => {
-                    log::error!("Error checking sidecar status during stop: {}", e);
-                    child.kill().ok();
+            // On Windows, just try to kill it
+            #[cfg(windows)]
+            {
+                log::info!("Killing sidecar process (Windows)");
+                child.kill().ok();
+            }
+
+            // Wait for graceful shutdown (up to 2 seconds)
+            let max_wait_ms = 2000;
+            let check_interval_ms = 100;
+            let mut waited_ms = 0;
+
+            while waited_ms < max_wait_ms {
+                thread::sleep(Duration::from_millis(check_interval_ms));
+                waited_ms += check_interval_ms;
+
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        log::info!("Sidecar process exited gracefully with status: {:?}", status);
+                        return Ok(());
+                    }
+                    Ok(None) => {
+                        // Still running, continue waiting
+                        continue;
+                    }
+                    Err(e) => {
+                        log::error!("Error checking sidecar status: {}", e);
+                        break;
+                    }
                 }
             }
+
+            // If we get here, the process didn't exit gracefully
+            log::warn!("Sidecar didn't stop after {}ms, sending SIGKILL...", max_wait_ms);
+            child.kill().context("Failed to kill sidecar process")?;
+            child.wait().context("Failed to wait for sidecar process")?;
+            log::info!("Sidecar process forcefully terminated");
         }
 
         Ok(())
