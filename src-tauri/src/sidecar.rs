@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime};
@@ -11,12 +12,14 @@ use crate::types::{ConnectionStatus, NowPlayingData, SidecarMessage};
 
 /// Manages the Node.js sidecar process
 pub struct SidecarManager {
-    child: Option<Child>,
+    child: Arc<Mutex<Option<Child>>>,
 }
 
 impl SidecarManager {
     pub fn new() -> Self {
-        Self { child: None }
+        Self {
+            child: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Spawn the sidecar process and start reading its output
@@ -120,7 +123,7 @@ impl SidecarManager {
             .context("Failed to capture sidecar stderr")?;
 
         // Store the child process
-        self.child = Some(child);
+        *self.child.lock().unwrap() = Some(child);
 
         // Spawn thread to read stdout (JSON messages)
         let app_handle = app.clone();
@@ -270,8 +273,9 @@ impl SidecarManager {
     }
 
     /// Check if the sidecar is still running
-    pub fn is_running(&mut self) -> bool {
-        if let Some(child) = &mut self.child {
+    pub fn is_running(&self) -> bool {
+        let mut child_guard = self.child.lock().unwrap();
+        if let Some(child) = child_guard.as_mut() {
             match child.try_wait() {
                 Ok(Some(_status)) => {
                     log::warn!("Sidecar process has exited");
@@ -289,8 +293,9 @@ impl SidecarManager {
     }
 
     /// Stop the sidecar process
-    pub fn stop(&mut self) -> Result<()> {
-        if let Some(mut child) = self.child.take() {
+    pub fn stop(&self) -> Result<()> {
+        let child_option = self.child.lock().unwrap().take();
+        if let Some(mut child) = child_option {
             log::info!("Stopping sidecar process with PID {}...", child.id());
 
             // Send SIGTERM for graceful shutdown
@@ -353,6 +358,7 @@ impl SidecarManager {
 
 impl Drop for SidecarManager {
     fn drop(&mut self) {
+        log::info!("SidecarManager Drop called, cleaning up...");
         if let Err(e) = self.stop() {
             log::error!("Error stopping sidecar in Drop: {}", e);
         }

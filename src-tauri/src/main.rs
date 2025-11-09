@@ -46,6 +46,31 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            match event {
+                tauri::RunEvent::Exit => {
+                    log::info!("App exit event received, cleaning up sidecar...");
+
+                    // Get the sidecar manager from managed state and stop it
+                    if let Some(sidecar) = app_handle.try_state::<sidecar::SidecarManager>() {
+                        if let Err(e) = sidecar.stop() {
+                            log::error!("Error stopping sidecar on exit: {}", e);
+                        }
+                    }
+                }
+                tauri::RunEvent::ExitRequested { .. } => {
+                    log::info!("App exit requested, cleaning up sidecar...");
+
+                    // Get the sidecar manager from managed state and stop it
+                    if let Some(sidecar) = app_handle.try_state::<sidecar::SidecarManager>() {
+                        if let Err(e) = sidecar.stop() {
+                            log::error!("Error stopping sidecar on exit request: {}", e);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
 }
