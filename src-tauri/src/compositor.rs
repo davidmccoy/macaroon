@@ -74,6 +74,7 @@ impl Compositor {
         const CANVAS_HEIGHT: u32 = 22 * SCALE_FACTOR;
         const ALBUM_ART_SIZE: u32 = 22 * SCALE_FACTOR;
         const TEXT_X_OFFSET: i32 = 28 * SCALE_FACTOR as i32;
+        const RIGHT_PADDING: u32 = 3 * SCALE_FACTOR;  // Small buffer for glyph overhang
 
         // Calculate dynamic canvas width based on text length
         let canvas_width = if !title.is_empty() || !artist.is_empty() {
@@ -81,8 +82,9 @@ impl Compositor {
             let scale = PxScale::from(63.0);
             let text_width = self.measure_text_width(&text, scale);
 
-            // Width = album art + spacing + text
-            let required_width = ALBUM_ART_SIZE + (TEXT_X_OFFSET as u32 - ALBUM_ART_SIZE) + text_width as u32;
+            // Width = album art + spacing + text + padding
+            // Use ceiling to ensure we have enough space for the full measured width
+            let required_width = ALBUM_ART_SIZE + (TEXT_X_OFFSET as u32 - ALBUM_ART_SIZE) + text_width.ceil() as u32 + RIGHT_PADDING;
 
             // Cap at maximum width
             let final_width = required_width.min(MAX_CANVAS_WIDTH);
@@ -122,7 +124,7 @@ impl Compositor {
         if !title.is_empty() || !artist.is_empty() {
             // Prepare text: "Title - Artist"
             let text = format!("{} - {}", title, artist);
-            let available_width = (canvas_width - TEXT_X_OFFSET as u32) as i32;
+            let available_width = (canvas_width - TEXT_X_OFFSET as u32 - RIGHT_PADDING) as i32;
             let display_text = self.truncate_text(&text, available_width);
 
             // Draw text at 3x scale for Retina
