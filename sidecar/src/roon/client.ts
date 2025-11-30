@@ -193,8 +193,8 @@ export class RoonClient {
     this.transportManager.clearTransportService();
     this.imageManager.clearImageService();
 
-    // Emit stopped state
-    output.emitNowPlaying('', '', '', 'stopped');
+    // Emit stopped state (no zone_id since disconnected)
+    output.emitNowPlaying('', '', '', '', 'stopped');
   }
 
   /**

@@ -5,17 +5,35 @@
  * Each message must be a single line of JSON.
  */
 
-export type PlaybackState = 'playing' | 'paused' | 'stopped';
+export type PlaybackState = 'playing' | 'paused' | 'stopped' | 'loading';
 
 export type ConnectionState = 'discovering' | 'not_authorized' | 'connected' | 'disconnected';
 
 export interface NowPlayingOutput {
   type: 'now_playing';
+  zone_id: string; // NEW: Zone identifier
   title: string;
   artist: string;
   album: string;
   state: PlaybackState;
   artwork?: string; // base64 data URL
+}
+
+export interface ZoneInfo {
+  zone_id: string;
+  display_name: string;
+  state: PlaybackState;
+  now_playing?: {
+    title: string;
+    artist: string;
+    album: string;
+    artwork?: string;
+  };
+}
+
+export interface ZoneListOutput {
+  type: 'zone_list';
+  zones: ZoneInfo[];
 }
 
 export interface StatusOutput {
@@ -29,7 +47,7 @@ export interface ErrorOutput {
   message: string;
 }
 
-export type SidecarOutput = NowPlayingOutput | StatusOutput | ErrorOutput;
+export type SidecarOutput = NowPlayingOutput | ZoneListOutput | StatusOutput | ErrorOutput;
 
 /**
  * Emit a JSON message to stdout
@@ -52,6 +70,7 @@ export function emit(data: SidecarOutput): void {
  * Emit a now playing update
  */
 export function emitNowPlaying(
+  zone_id: string,
   title: string,
   artist: string,
   album: string,
@@ -60,11 +79,22 @@ export function emitNowPlaying(
 ): void {
   emit({
     type: 'now_playing',
+    zone_id,
     title,
     artist,
     album,
     state,
     artwork,
+  });
+}
+
+/**
+ * Emit a zone list update
+ */
+export function emitZoneList(zones: ZoneInfo[]): void {
+  emit({
+    type: 'zone_list',
+    zones,
   });
 }
 

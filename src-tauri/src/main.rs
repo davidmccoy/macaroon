@@ -23,13 +23,14 @@ fn main() {
             // Create shared state
             let state = state::create_state();
 
-            // Initialize system tray
+            // Initialize system tray first
             tray::TrayManager::setup(app.handle(), state.clone())
                 .expect("Failed to setup system tray");
 
             log::info!("System tray initialized");
 
             // Spawn sidecar process
+            // Zones will arrive and populate the menu within ~500ms
             let mut sidecar_manager = sidecar::SidecarManager::new();
             match sidecar_manager.spawn(app.handle(), state.clone()) {
                 Ok(_) => {

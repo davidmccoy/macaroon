@@ -8,7 +8,8 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::state::SharedState;
 use crate::tray::TrayManager;
-use crate::types::{ConnectionStatus, NowPlayingData, SidecarMessage};
+use crate::types::{ConnectionStatus, NowPlayingData, SidecarMessage, Zone};
+use std::time::Instant;
 
 /// Manages the Node.js sidecar process
 #[derive(Clone)]
@@ -201,6 +202,36 @@ impl SidecarManager {
         log::warn!("Sidecar stderr reader stopped");
     }
 
+    /// Check if zones have meaningfully changed (number, IDs, names, or states)
+    fn zones_changed(old_zones: &[Zone], new_zones: &[Zone]) -> bool {
+        // Different number of zones
+        if old_zones.len() != new_zones.len() {
+            return true;
+        }
+
+        // Check each zone
+        for new_zone in new_zones {
+            match old_zones.iter().find(|z| z.zone_id == new_zone.zone_id) {
+                None => return true, // New zone appeared
+                Some(old_zone) => {
+                    // Check if display name or state changed
+                    if old_zone.display_name != new_zone.display_name || old_zone.state != new_zone.state {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Check if any old zones disappeared
+        for old_zone in old_zones {
+            if !new_zones.iter().any(|z| z.zone_id == old_zone.zone_id) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Handle a message from the sidecar
     fn handle_message<R: Runtime>(
         message: SidecarMessage,
@@ -209,13 +240,14 @@ impl SidecarManager {
     ) -> Result<()> {
         match message {
             SidecarMessage::NowPlaying {
+                zone_id,
                 title,
                 artist,
                 album,
                 state: playback_state,
                 artwork,
             } => {
-                log::info!("Now playing: {} - {} ({:?})", title, artist, playback_state);
+                log::info!("Now playing in zone {}: {} - {} ({:?})", zone_id, title, artist, playback_state);
 
                 // Update app state
                 let track_data = NowPlayingData {
@@ -230,14 +262,142 @@ impl SidecarManager {
                 {
                     let state_clone = state.clone();
                     let track_data_clone = track_data.clone();
+                    let zone_id_clone = zone_id.clone();
                     tauri::async_runtime::spawn(async move {
                         let mut state_guard = state_clone.write().await;
-                        state_guard.current_track = Some(track_data_clone);
+                        state_guard.current_track = Some(track_data_clone.clone());
+
+                        // Also update the specific zone's now_playing data
+                        if let Some(zone) = state_guard.all_zones.iter_mut().find(|z| z.zone_id == zone_id_clone) {
+                            zone.now_playing = Some(track_data_clone);
+                            zone.state_changed_at = Instant::now();
+                        }
                     });
                 }
 
                 // Update tray icon
                 TrayManager::update_icon(app, state.clone())?;
+            }
+            SidecarMessage::ZoneList { zones } => {
+                log::warn!(">>> ZONE_LIST received: {} zones", zones.len());
+                for z in &zones {
+                    log::warn!("    - {} ({}): {:?}", z.display_name, z.zone_id, z.state);
+                }
+
+                // Update all zones in state
+                let state_clone = state.clone();
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut state_guard = state_clone.write().await;
+
+                    // Capture old zone count for initial load detection
+                    let old_zones_count = state_guard.all_zones.len();
+
+                    // Convert ZoneInfo to Zone
+                    let now = Instant::now();
+                    let new_zones: Vec<Zone> = zones.into_iter().map(|zone_info| {
+                        // Find existing zone to preserve state_changed_at
+                        let state_changed_at = state_guard.all_zones
+                            .iter()
+                            .find(|z| z.zone_id == zone_info.zone_id)
+                            .map(|z| z.state_changed_at)
+                            .unwrap_or(now);
+
+                        let state_clone = zone_info.state.clone();
+                        Zone {
+                            zone_id: zone_info.zone_id,
+                            display_name: zone_info.display_name,
+                            state: zone_info.state,
+                            now_playing: zone_info.now_playing.map(|np| NowPlayingData {
+                                title: np.title,
+                                artist: np.artist,
+                                album: np.album,
+                                state: state_clone.clone(),
+                                artwork: np.artwork,
+                            }),
+                            state_changed_at,
+                        }
+                    }).collect();
+
+                    // Check if zones actually changed (to avoid unnecessary rebuilds)
+                    let zones_changed = Self::zones_changed(&state_guard.all_zones, &new_zones);
+
+                    // Check if this is the initial zone load BEFORE updating state
+                    let is_initial_load = old_zones_count == 0 && !new_zones.is_empty();
+                    let new_zones_count = new_zones.len();
+
+                    log::warn!("!!! zones_changed={}, is_initial_load={}, old_count={}, new_count={}",
+                        zones_changed, is_initial_load, old_zones_count, new_zones_count);
+
+                    state_guard.all_zones = new_zones;
+
+                    if zones_changed {
+                        log::warn!("!!! ZONES CHANGED - updating state");
+                        for zone in &state_guard.all_zones {
+                            log::warn!("    Zone: {} ({}): {:?}", zone.display_name, zone.zone_id, zone.state);
+                        }
+                    } else {
+                        log::warn!("!!! ZONES NOT CHANGED - no state update");
+                    }
+
+                    // Drop the lock
+                    drop(state_guard);
+
+                    // Determine if we need to rebuild the menu
+                    let needs_rebuild = if is_initial_load {
+                        // Skip rebuild for the very first zone load to prevent menu closing on first interaction
+                        log::warn!("!!! INITIAL LOAD: Skipping rebuild (0 → {})", new_zones_count);
+                        log::warn!("!!! Setting needs_menu_rebuild flag for next update");
+
+                        // Set flag to force rebuild on next update
+                        let mut state_guard = state_clone.write().await;
+                        state_guard.needs_menu_rebuild = true;
+                        drop(state_guard);
+
+                        false // Don't rebuild now
+                    } else {
+                        // Check if we need to force rebuild or if zones actually changed
+                        let state_guard = state_clone.read().await;
+                        let force_rebuild = state_guard.needs_menu_rebuild;
+                        drop(state_guard);
+
+                        if force_rebuild {
+                            log::warn!("!!! FORCED REBUILD: needs_menu_rebuild flag is set");
+                            true
+                        } else if zones_changed {
+                            // Zones actually changed - check debounce
+                            let state_guard = state_clone.read().await;
+                            let should_rebuild = match state_guard.last_menu_rebuild {
+                                None => true,
+                                Some(last_rebuild) => last_rebuild.elapsed().as_secs() >= 1,
+                            };
+                            drop(state_guard);
+
+                            if should_rebuild {
+                                log::warn!("!!! ZONES CHANGED: Rebuilding menu");
+                                true
+                            } else {
+                                log::warn!("!!! ZONES CHANGED but debounced (too soon)");
+                                false
+                            }
+                        } else {
+                            log::warn!("!!! ZONES NOT CHANGED - no rebuild needed");
+                            false
+                        }
+                    };
+
+                    if needs_rebuild {
+                        log::warn!("╔═══ EXECUTING REBUILD ═══");
+                        if let Err(e) = TrayManager::rebuild_menu(&app_clone, &state_clone).await {
+                            log::error!("Failed to rebuild menu: {}", e);
+                        } else {
+                            let mut state_guard = state_clone.write().await;
+                            state_guard.last_menu_rebuild = Some(Instant::now());
+                            state_guard.needs_menu_rebuild = false; // Clear the flag
+                            log::warn!("╚═══ REBUILD COMPLETE ═══");
+                        }
+                    }
+                });
             }
             SidecarMessage::Status { state: status_str, message } => {
                 log::info!("Sidecar status: {} - {:?}", status_str, message);
