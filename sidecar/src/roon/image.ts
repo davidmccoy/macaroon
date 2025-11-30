@@ -10,16 +10,65 @@ export interface ImageService {
   get_image: (image_key: string, options: any, callback: (error: any, contentType: string, body: Buffer) => void) => void;
 }
 
-interface ArtworkCache {
-  [imageKey: string]: string; // base64 data URL
+/**
+ * Simple LRU (Least Recently Used) cache implementation
+ * Uses Map's insertion order preservation to track access order
+ */
+class LRUCache<K, V> {
+  private cache = new Map<K, V>();
+  private maxSize: number;
+
+  constructor(maxSize: number) {
+    this.maxSize = maxSize;
+  }
+
+  get(key: K): V | undefined {
+    const value = this.cache.get(key);
+    if (value !== undefined) {
+      // Move to end (most recently used) by re-inserting
+      this.cache.delete(key);
+      this.cache.set(key, value);
+    }
+    return value;
+  }
+
+  set(key: K, value: V): void {
+    // If key exists, delete it first (will be re-added at end)
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.maxSize) {
+      // Cache is full, delete oldest (first) entry
+      const firstKey = this.cache.keys().next().value;
+      if (firstKey !== undefined) {
+        this.cache.delete(firstKey);
+      }
+    }
+    this.cache.set(key, value);
+  }
+
+  has(key: K): boolean {
+    return this.cache.has(key);
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
 }
+
+// Maximum number of artwork entries to cache
+// At ~100KB per image, 100 entries = ~10MB max memory usage
+const MAX_CACHE_SIZE = 100;
 
 /**
  * Manages artwork fetching and caching
  */
 export class ImageManager {
   private imageService: ImageService | null = null;
-  private cache: ArtworkCache = {};
+  private cache = new LRUCache<string, string>(MAX_CACHE_SIZE);
 
   /**
    * Set the Roon image service (called after core connects)
@@ -30,10 +79,12 @@ export class ImageManager {
   }
 
   /**
-   * Clear the image service (called on disconnect)
+   * Clear the image service and cache (called on disconnect)
+   * Cache is cleared because image keys are specific to a Roon core
    */
   clearImageService(): void {
     this.imageService = null;
+    this.clearCache();
     output.debug('Image service cleared');
   }
 
@@ -48,9 +99,10 @@ export class ImageManager {
     }
 
     // Check cache first
-    if (this.cache[imageKey]) {
+    const cached = this.cache.get(imageKey);
+    if (cached) {
       output.debug(`Using cached artwork for ${imageKey}`);
-      return this.cache[imageKey];
+      return cached;
     }
 
     if (!this.imageService) {
@@ -61,8 +113,8 @@ export class ImageManager {
     try {
       const dataUrl = await this.getImageAsDataUrl(imageKey);
 
-      // Cache the result
-      this.cache[imageKey] = dataUrl;
+      // Cache the result (LRU will evict oldest if at capacity)
+      this.cache.set(imageKey, dataUrl);
 
       output.debug(`Fetched and cached artwork for ${imageKey}`);
       return dataUrl;
@@ -118,18 +170,17 @@ export class ImageManager {
 
   /**
    * Clear the artwork cache
-   * Useful to prevent memory leaks during long-running sessions
    */
   clearCache(): void {
-    const cacheSize = Object.keys(this.cache).length;
-    this.cache = {};
+    const cacheSize = this.cache.size;
+    this.cache.clear();
     output.debug(`Cleared artwork cache (${cacheSize} items)`);
   }
 
   /**
-   * Get cache statistics
+   * Get current cache size
    */
   getCacheSize(): number {
-    return Object.keys(this.cache).length;
+    return this.cache.size;
   }
 }
