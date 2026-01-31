@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 use crate::types::AppState;
 

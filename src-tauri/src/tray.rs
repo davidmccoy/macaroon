@@ -24,7 +24,7 @@ impl TrayManager {
     pub fn setup<R: Runtime>(app: &AppHandle<R>, state: SharedState) -> Result<()> {
         // Set initial menu rebuild time
         {
-            let mut state_guard = state.blocking_write();
+            let mut state_guard = state.write();
             state_guard.last_menu_rebuild = Some(std::time::Instant::now());
         }
 
@@ -56,11 +56,11 @@ impl TrayManager {
         Ok(())
     }
 
-    /// Build the tray menu with zones submenu (async version)
-    async fn build_menu_async<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<Menu<R>> {
-        let state_guard = state.read().await;
+    /// Build the tray menu with zones submenu (for rebuild)
+    fn build_menu_for_rebuild<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<Menu<R>> {
+        let state_guard = state.read();
 
-        log::warn!(">>> Building menu (async) with {} zones", state_guard.all_zones.len());
+        log::warn!(">>> Building menu (rebuild) with {} zones", state_guard.all_zones.len());
         for zone in &state_guard.all_zones {
             log::warn!("    Menu will include: {} ({:?})", zone.display_name, zone.state);
         }
@@ -84,9 +84,9 @@ impl TrayManager {
         Ok(menu)
     }
 
-    /// Build the tray menu with zones submenu (blocking version for setup)
+    /// Build the tray menu with zones submenu (for initial setup)
     fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<Menu<R>> {
-        let state_guard = state.blocking_read();
+        let state_guard = state.read();
 
         log::info!("Building menu with {} zones", state_guard.all_zones.len());
 
@@ -112,7 +112,7 @@ impl TrayManager {
     /// Build the zones submenu
     fn build_zones_submenu<R: Runtime>(
         app: &AppHandle<R>,
-        state_guard: &tokio::sync::RwLockReadGuard<crate::types::AppState>,
+        state_guard: &parking_lot::RwLockReadGuard<crate::types::AppState>,
     ) -> Result<Submenu<R>> {
         // Create submenu first
         let submenu = Submenu::new(app, "Select Zone", true)?;
@@ -194,55 +194,47 @@ impl TrayManager {
                 log::info!("Zone selected: {}", zone_id);
 
                 // Update zone preference
-                tauri::async_runtime::spawn({
-                    let state = state.clone();
-                    let zone_id = zone_id.to_string();
-                    let app = app.clone();
+                {
+                    let mut state_guard = state.write();
+                    state_guard.zone_preference = ZonePreference::Selected {
+                        zone_id: zone_id.to_string(),
+                        smart_switching: true,  // Default enabled
+                        grace_period_mins: 5,   // Default 5 minutes
+                    };
 
-                    async move {
-                        let mut state_guard = state.write().await;
-                        state_guard.zone_preference = ZonePreference::Selected {
-                            zone_id: zone_id.clone(),
-                            smart_switching: true,  // Default enabled
-                            grace_period_mins: 5,   // Default 5 minutes
-                        };
+                    // Reset smart-switch state since user explicitly selected a zone
+                    state_guard.is_smart_switched = false;
+                    state_guard.preferred_zone_stopped_at = None;
 
-                        // Reset smart-switch state since user explicitly selected a zone
-                        state_guard.is_smart_switched = false;
-                        state_guard.preferred_zone_stopped_at = None;
+                    log::info!("Zone preference updated to: {}", zone_id);
+                }
 
-                        log::info!("Zone preference updated to: {}", zone_id);
+                // Rebuild menu to show checkmark on selected zone
+                if let Err(e) = Self::rebuild_menu(app, state) {
+                    log::error!("Failed to rebuild menu: {}", e);
+                }
 
-                        // Drop the lock before calling rebuild_menu
-                        drop(state_guard);
+                // Update last rebuild time
+                {
+                    let mut state_guard = state.write();
+                    state_guard.last_menu_rebuild = Some(std::time::Instant::now());
+                }
 
-                        // Rebuild menu to show checkmark on selected zone
-                        if let Err(e) = Self::rebuild_menu(&app, &state).await {
-                            log::error!("Failed to rebuild menu: {}", e);
-                        }
-
-                        // Update last rebuild time
-                        let mut state_guard = state.write().await;
-                        state_guard.last_menu_rebuild = Some(std::time::Instant::now());
-                        drop(state_guard);
-
-                        // Update tray icon to display the selected zone
-                        if let Err(e) = Self::update_icon(&app, state.clone()) {
-                            log::error!("Failed to update icon after zone selection: {}", e);
-                        }
-                    }
-                });
+                // Update tray icon to display the selected zone
+                if let Err(e) = Self::update_icon(app, state.clone()) {
+                    log::error!("Failed to update icon after zone selection: {}", e);
+                }
             }
         }
     }
 
     /// Rebuild the tray menu (called when zones change or preference changes)
-    pub async fn rebuild_menu<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<()> {
+    pub fn rebuild_menu<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<()> {
         log::warn!("╔═══════════════════════════════");
         log::warn!("║ REBUILD_MENU CALLED");
         log::warn!("╚═══════════════════════════════");
 
-        let new_menu = Self::build_menu_async(app, state).await?;
+        let new_menu = Self::build_menu_for_rebuild(app, state)?;
 
         if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
             tray.set_menu(Some(new_menu))?;
@@ -272,7 +264,7 @@ impl TrayManager {
         let manager = TrayManager::new()?;
 
         // Read current state
-        let state_guard = state.blocking_read();
+        let state_guard = state.read();
 
         if let Some(track) = &state_guard.current_track {
             match track.state {

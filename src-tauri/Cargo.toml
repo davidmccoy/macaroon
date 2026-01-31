@@ -13,8 +13,8 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Async runtime
-tokio = { version = "1", features = ["full", "time", "sync"] }
+# Async runtime (used by Tauri internally)
+tokio = { version = "1", features = ["time"] }
 
 # Image processing
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -33,6 +33,9 @@ env_logger = "0.11"
 # Error handling
 anyhow = "1"
 thiserror = "1"
+
+# Synchronization primitives
+parking_lot = "0.12"
 
 # Signal handling
 ctrlc = "3.4"

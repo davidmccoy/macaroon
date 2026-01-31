@@ -258,24 +258,19 @@ impl SidecarManager {
                     artwork,
                 };
 
-                // Update state using tokio runtime
+                // Update state
                 {
-                    let state_clone = state.clone();
-                    let track_data_clone = track_data.clone();
-                    let zone_id_clone = zone_id.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let mut state_guard = state_clone.write().await;
-                        state_guard.current_track = Some(track_data_clone.clone());
+                    let mut state_guard = state.write();
+                    state_guard.current_track = Some(track_data.clone());
 
-                        // Also update the specific zone's now_playing data
-                        if let Some(zone) = state_guard.all_zones.iter_mut().find(|z| z.zone_id == zone_id_clone) {
-                            zone.now_playing = Some(track_data_clone);
-                            zone.state_changed_at = Instant::now();
-                        }
-                    });
+                    // Also update the specific zone's now_playing data
+                    if let Some(zone) = state_guard.all_zones.iter_mut().find(|z| z.zone_id == zone_id) {
+                        zone.now_playing = Some(track_data);
+                        zone.state_changed_at = Instant::now();
+                    }
                 }
 
-                // Update tray icon
+                // Update tray icon (state is now guaranteed to be updated)
                 TrayManager::update_icon(app, state.clone())?;
             }
             SidecarMessage::ZoneList { zones } => {
@@ -284,11 +279,9 @@ impl SidecarManager {
                     log::warn!("    - {} ({}): {:?}", z.display_name, z.zone_id, z.state);
                 }
 
-                // Update all zones in state
-                let state_clone = state.clone();
-                let app_clone = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut state_guard = state_clone.write().await;
+                // Compute derived values while holding the lock
+                let (zones_changed, is_initial_load, new_zones_count, needs_rebuild) = {
+                    let mut state_guard = state.write();
 
                     // Capture old zone count for initial load detection
                     let old_zones_count = state_guard.all_zones.len();
@@ -340,38 +333,25 @@ impl SidecarManager {
                         log::warn!("!!! ZONES NOT CHANGED - no state update");
                     }
 
-                    // Drop the lock
-                    drop(state_guard);
-
                     // Determine if we need to rebuild the menu
                     let needs_rebuild = if is_initial_load {
                         // Skip rebuild for the very first zone load to prevent menu closing on first interaction
                         log::warn!("!!! INITIAL LOAD: Skipping rebuild (0 → {})", new_zones_count);
                         log::warn!("!!! Setting needs_menu_rebuild flag for next update");
-
-                        // Set flag to force rebuild on next update
-                        let mut state_guard = state_clone.write().await;
                         state_guard.needs_menu_rebuild = true;
-                        drop(state_guard);
-
                         false // Don't rebuild now
                     } else {
-                        // Check if we need to force rebuild or if zones actually changed
-                        let state_guard = state_clone.read().await;
                         let force_rebuild = state_guard.needs_menu_rebuild;
-                        drop(state_guard);
 
                         if force_rebuild {
                             log::warn!("!!! FORCED REBUILD: needs_menu_rebuild flag is set");
                             true
                         } else if zones_changed {
                             // Zones actually changed - check debounce
-                            let state_guard = state_clone.read().await;
                             let should_rebuild = match state_guard.last_menu_rebuild {
                                 None => true,
                                 Some(last_rebuild) => last_rebuild.elapsed().as_secs() >= 1,
                             };
-                            drop(state_guard);
 
                             if should_rebuild {
                                 log::warn!("!!! ZONES CHANGED: Rebuilding menu");
@@ -386,18 +366,23 @@ impl SidecarManager {
                         }
                     };
 
-                    if needs_rebuild {
-                        log::warn!("╔═══ EXECUTING REBUILD ═══");
-                        if let Err(e) = TrayManager::rebuild_menu(&app_clone, &state_clone).await {
-                            log::error!("Failed to rebuild menu: {}", e);
-                        } else {
-                            let mut state_guard = state_clone.write().await;
-                            state_guard.last_menu_rebuild = Some(Instant::now());
-                            state_guard.needs_menu_rebuild = false; // Clear the flag
-                            log::warn!("╚═══ REBUILD COMPLETE ═══");
-                        }
+                    (zones_changed, is_initial_load, new_zones_count, needs_rebuild)
+                };
+
+                if needs_rebuild {
+                    log::warn!("╔═══ EXECUTING REBUILD ═══");
+                    if let Err(e) = TrayManager::rebuild_menu(app, state) {
+                        log::error!("Failed to rebuild menu: {}", e);
+                    } else {
+                        let mut state_guard = state.write();
+                        state_guard.last_menu_rebuild = Some(Instant::now());
+                        state_guard.needs_menu_rebuild = false; // Clear the flag
+                        log::warn!("╚═══ REBUILD COMPLETE ═══");
                     }
-                });
+                }
+
+                // Suppress unused variable warnings
+                let _ = (zones_changed, is_initial_load, new_zones_count);
             }
             SidecarMessage::Status { state: status_str, message } => {
                 log::info!("Sidecar status: {} - {:?}", status_str, message);
@@ -413,20 +398,14 @@ impl SidecarManager {
                     _ => ConnectionStatus::Error(format!("Unknown status: {}", status_str)),
                 };
 
-                let state_clone = state.clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut state_guard = state_clone.write().await;
-                    state_guard.connection_status = status;
-                });
+                let mut state_guard = state.write();
+                state_guard.connection_status = status;
             }
             SidecarMessage::Error { message } => {
                 log::error!("Sidecar error: {}", message);
 
-                let state_clone = state.clone();
-                tauri::async_runtime::spawn(async move {
-                    let mut state_guard = state_clone.write().await;
-                    state_guard.connection_status = ConnectionStatus::Error(message);
-                });
+                let mut state_guard = state.write();
+                state_guard.connection_status = ConnectionStatus::Error(message);
             }
         }
 
