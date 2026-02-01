@@ -9,6 +9,7 @@ import { ImageManager } from './image.js';
 
 export interface TransportService {
   subscribe_zones: (callback: (response: string, data: any) => void) => void;
+  subscribe_outputs: (callback: (response: string, data: any) => void) => void;
 }
 
 interface Zone {
@@ -17,6 +18,19 @@ interface Zone {
   outputs: any[];
   now_playing?: NowPlayingData;
   state?: string;
+}
+
+interface Output {
+  output_id: string;
+  zone_id?: string;
+  display_name: string;
+  state?: string;
+  source_controls?: Array<{
+    control_key: string;
+    display_name: string;
+    status: string; // 'selected', 'standby', 'deselected', etc.
+    supports_standby: boolean;
+  }>;
 }
 
 interface NowPlayingData {
@@ -44,21 +58,23 @@ interface ZonesData {
   zones_seek_changed?: any[];
 }
 
+interface OutputsData {
+  outputs?: Output[];
+  outputs_changed?: Output[];
+  outputs_removed?: string[];
+}
+
 /**
  * Manages zone subscriptions and now playing state
  */
 export class TransportManager {
   private transportService: TransportService | null = null;
   private imageManager: ImageManager;
-  private currentZoneId: string | null = null;
-  private lastImageKey: string | null = null;
   private allZones: Map<string, Zone> = new Map(); // Track ALL zones by zone_id
-  private zoneListEmitInterval: NodeJS.Timeout | null = null;
+  private allOutputs: Map<string, Output> = new Map(); // Track ALL outputs by output_id
 
   constructor(imageManager: ImageManager) {
     this.imageManager = imageManager;
-    // Start periodic zone list emission (every 5 seconds)
-    this.startZoneListEmission();
   }
 
   /**
@@ -68,10 +84,12 @@ export class TransportManager {
     output.info('=== SETTING TRANSPORT SERVICE ===');
     output.info(`Service object received: ${!!service}`);
     output.info(`Service has subscribe_zones: ${!!(service && service.subscribe_zones)}`);
+    output.info(`Service has subscribe_outputs: ${!!(service && service.subscribe_outputs)}`);
 
     this.transportService = service;
-    output.info('Transport service stored, now subscribing to zones...');
+    output.info('Transport service stored, now subscribing to zones and outputs...');
     this.subscribeToZones();
+    this.subscribeToOutputs();
   }
 
   /**
@@ -79,36 +97,27 @@ export class TransportManager {
    */
   clearTransportService(): void {
     this.transportService = null;
-    this.currentZoneId = null;
-    this.lastImageKey = null;
     this.allZones.clear();
+    this.allOutputs.clear();
     output.debug('Transport service cleared');
   }
 
   /**
-   * Start periodic emission of zone list
-   */
-  private startZoneListEmission(): void {
-    // Emit zone list every 5 seconds
-    this.zoneListEmitInterval = setInterval(() => {
-      this.emitCurrentZoneList();
-    }, 5000);
-  }
-
-  /**
-   * Stop periodic emission
-   */
-  stopZoneListEmission(): void {
-    if (this.zoneListEmitInterval) {
-      clearInterval(this.zoneListEmitInterval);
-      this.zoneListEmitInterval = null;
-    }
-  }
-
-  /**
    * Emit the current zone list to Rust
+   * Includes both active zones and standby outputs (which aren't in zones yet)
    */
   private emitCurrentZoneList(): void {
+    // Collect zone IDs that have active zones
+    const zoneOutputIds = new Set<string>();
+    this.allZones.forEach(zone => {
+      zone.outputs?.forEach(out => {
+        if (out.output_id) {
+          zoneOutputIds.add(out.output_id);
+        }
+      });
+    });
+
+    // Build zone list from active zones
     const zones: output.ZoneInfo[] = Array.from(this.allZones.values()).map(zone => {
       const state = this.mapRoonStateToPlaybackState(zone.state || 'stopped');
       const zoneInfo: output.ZoneInfo = {
@@ -132,9 +141,27 @@ export class TransportManager {
       return zoneInfo;
     });
 
+    // Add outputs that aren't part of any active zone
+    // These are outputs that exist but aren't currently in the zones list
+    this.allOutputs.forEach(out => {
+      // Skip if this output is already represented in a zone
+      if (zoneOutputIds.has(out.output_id)) {
+        return;
+      }
+
+      // Include any output that's not in an active zone
+      // Status can be 'standby', 'selected', 'indeterminate', etc.
+      zones.push({
+        zone_id: `output:${out.output_id}`, // Prefix to distinguish from real zones
+        display_name: `${out.display_name} (Inactive)`,
+        state: 'stopped',
+      });
+      output.debug(`Including inactive output: ${out.display_name}`);
+    });
+
     if (zones.length > 0) {
       output.emitZoneList(zones);
-      output.debug(`Emitted zone list with ${zones.length} zone(s)`);
+      output.debug(`Emitted zone list with ${zones.length} zone(s)/output(s)`);
     }
   }
 
@@ -198,6 +225,74 @@ export class TransportManager {
   }
 
   /**
+   * Subscribe to all outputs and listen for updates
+   * Outputs include standby devices that may not be in active zones
+   */
+  private subscribeToOutputs(): void {
+    if (!this.transportService) {
+      output.warn('Cannot subscribe to outputs: transport service not available');
+      return;
+    }
+
+    output.info('=== SUBSCRIBING TO OUTPUTS ===');
+    output.info('Calling transportService.subscribe_outputs()...');
+
+    try {
+      this.transportService.subscribe_outputs((response: string, data: OutputsData) => {
+        output.debug(`Output subscription callback: ${response}`);
+
+        if (response === 'Subscribed') {
+          output.info('✓ Successfully subscribed to outputs');
+          output.info(`Initial outputs count: ${(data.outputs || []).length}`);
+          this.handleOutputsUpdate(data);
+        } else if (response === 'Changed') {
+          output.debug(`Outputs changed: ${(data.outputs_changed || []).length}`);
+          this.handleOutputsUpdate(data);
+        } else if (response === 'NetworkError' || response === 'ConnectionError') {
+          output.warn(`Output subscription error: ${response}`);
+        } else {
+          output.debug(`Unknown output subscription response: ${response}`);
+        }
+      });
+
+      output.info('✓ Output subscription callback registered');
+    } catch (error) {
+      output.error('Error subscribing to outputs:', error);
+      // Don't emit error to Rust - outputs are supplementary
+    }
+  }
+
+  /**
+   * Handle output updates from Roon
+   */
+  private handleOutputsUpdate(data: OutputsData): void {
+    // Handle outputs_removed
+    if (data.outputs_removed && data.outputs_removed.length > 0) {
+      data.outputs_removed.forEach(outputId => {
+        if (this.allOutputs.has(outputId)) {
+          this.allOutputs.delete(outputId);
+          output.info(`Removed output: ${outputId}`);
+        }
+      });
+    }
+
+    // Handle new or changed outputs
+    const outputs = data.outputs || data.outputs_changed || [];
+    outputs.forEach(out => {
+      const existing = this.allOutputs.get(out.output_id);
+      if (!existing) {
+        output.info(`New output: ${out.display_name} (${out.output_id})`);
+      }
+      // Always update the output data
+      this.allOutputs.set(out.output_id, out);
+    });
+
+    // Always emit zone list when we receive output updates
+    // This ensures inactive outputs are always reflected in the menu
+    this.emitCurrentZoneList();
+  }
+
+  /**
    * Handle zone updates from Roon
    */
   private async handleZonesUpdate(data: ZonesData): Promise<void> {
@@ -240,24 +335,16 @@ export class TransportManager {
       // Emit updated zone list immediately when zones change
       this.emitCurrentZoneList();
 
-      // Find first playing zone to emit individual now_playing message
-      // (This maintains backward compatibility with current behavior)
-      const activeZone = zones.find(
+      // Emit now_playing for ALL playing/paused zones so artwork is available
+      // when the user switches between zones
+      const playingZones = zones.filter(
         (zone) => zone.state === 'playing' || zone.state === 'paused'
-      ) || zones[0];
+      );
 
-      if (!activeZone) {
-        output.warn('No active zone found despite having zones');
-        return;
+      for (const zone of playingZones) {
+        output.debug(`Emitting now_playing for zone: ${zone.display_name} (${zone.state})`);
+        await this.extractAndEmitNowPlaying(zone);
       }
-
-      output.info(`Selected active zone for now_playing: ${activeZone.display_name} (${activeZone.state})`);
-
-      // Update current zone
-      this.currentZoneId = activeZone.zone_id;
-
-      // Extract and emit now playing data for the active zone
-      await this.extractAndEmitNowPlaying(activeZone);
     } catch (error) {
       output.error('Error handling zone update:', error);
     }
@@ -298,7 +385,6 @@ export class TransportManager {
     // Handle stopped state
     if (state === 'stopped' || !nowPlaying) {
       output.emitNowPlaying(zone.zone_id, '', '', '', 'stopped');
-      this.lastImageKey = null;
       return;
     }
 
@@ -308,16 +394,11 @@ export class TransportManager {
     // Map Roon state to our state enum
     const playbackState = this.mapRoonStateToPlaybackState(state);
 
-    // Fetch artwork if available and changed
+    // Fetch artwork if available (image manager has caching)
     let artwork: string | undefined;
     const imageKey = nowPlaying.image_key;
 
-    if (imageKey && imageKey !== this.lastImageKey) {
-      output.debug(`New image key detected: ${imageKey}`);
-      artwork = await this.imageManager.fetchArtwork(imageKey);
-      this.lastImageKey = imageKey;
-    } else if (imageKey === this.lastImageKey) {
-      // Same image key, try to get from cache
+    if (imageKey) {
       artwork = await this.imageManager.fetchArtwork(imageKey);
     }
 

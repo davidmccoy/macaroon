@@ -106,14 +106,13 @@ pub struct AppState {
     pub current_track: Option<NowPlayingData>,
     pub connection_status: ConnectionStatus,
 
-    // New zone management fields
+    // Zone management fields
     pub all_zones: Vec<Zone>,
     pub zone_preference: ZonePreference,
     pub active_zone_id: Option<String>,
     pub preferred_zone_stopped_at: Option<Instant>,
     pub is_smart_switched: bool,
     pub last_menu_rebuild: Option<Instant>,
-    pub needs_menu_rebuild: bool, // Force rebuild on next opportunity
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,7 +134,6 @@ impl Default for AppState {
             preferred_zone_stopped_at: None,
             is_smart_switched: false,
             last_menu_rebuild: None,
-            needs_menu_rebuild: false,
         }
     }
 }

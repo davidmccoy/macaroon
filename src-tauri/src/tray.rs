@@ -22,13 +22,10 @@ impl TrayManager {
 
     /// Initialize the system tray
     pub fn setup<R: Runtime>(app: &AppHandle<R>, state: SharedState) -> Result<()> {
-        // Set initial menu rebuild time
-        {
-            let mut state_guard = state.write();
-            state_guard.last_menu_rebuild = Some(std::time::Instant::now());
-        }
+        // Don't set last_menu_rebuild here - let it be None so the first
+        // zone update will trigger a rebuild immediately
 
-        // Create initial menu (should have zones by now if sidecar connected)
+        // Create initial menu (will show "no zones" until sidecar sends zones)
         let menu = Self::build_menu(app, &state)?;
 
         // Create initial tray icon
@@ -60,10 +57,7 @@ impl TrayManager {
     fn build_menu_for_rebuild<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<Menu<R>> {
         let state_guard = state.read();
 
-        log::warn!(">>> Building menu (rebuild) with {} zones", state_guard.all_zones.len());
-        for zone in &state_guard.all_zones {
-            log::warn!("    Menu will include: {} ({:?})", zone.display_name, zone.state);
-        }
+        log::debug!("Rebuilding menu with {} zones", state_guard.all_zones.len());
 
         // Build zones submenu
         let zones_submenu = Self::build_zones_submenu(app, &state_guard)?;
@@ -193,7 +187,7 @@ impl TrayManager {
                 // This is a zone selection
                 log::info!("Zone selected: {}", zone_id);
 
-                // Update zone preference
+                // Update zone preference and load selected zone's track
                 {
                     let mut state_guard = state.write();
                     state_guard.zone_preference = ZonePreference::Selected {
@@ -205,6 +199,23 @@ impl TrayManager {
                     // Reset smart-switch state since user explicitly selected a zone
                     state_guard.is_smart_switched = false;
                     state_guard.preferred_zone_stopped_at = None;
+
+                    // Load the selected zone's now_playing data as current_track
+                    // Clone data first to avoid borrow issues
+                    let zone_data = state_guard.all_zones.iter()
+                        .find(|z| z.zone_id == zone_id)
+                        .map(|z| (z.now_playing.clone(), z.display_name.clone()));
+
+                    if let Some((now_playing, display_name)) = zone_data {
+                        state_guard.current_track = now_playing;
+                        state_guard.active_zone_id = Some(zone_id.to_string());
+                        log::info!("Loaded track from zone: {}", display_name);
+                    } else {
+                        // Zone not found (might be an output:xxx synthetic zone)
+                        state_guard.current_track = None;
+                        state_guard.active_zone_id = Some(zone_id.to_string());
+                        log::info!("Zone not found, cleared current track");
+                    }
 
                     log::info!("Zone preference updated to: {}", zone_id);
                 }
@@ -230,15 +241,13 @@ impl TrayManager {
 
     /// Rebuild the tray menu (called when zones change or preference changes)
     pub fn rebuild_menu<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<()> {
-        log::warn!("╔═══════════════════════════════");
-        log::warn!("║ REBUILD_MENU CALLED");
-        log::warn!("╚═══════════════════════════════");
+        log::debug!("Rebuilding tray menu");
 
         let new_menu = Self::build_menu_for_rebuild(app, state)?;
 
         if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
             tray.set_menu(Some(new_menu))?;
-            log::warn!(">>> Menu rebuilt and applied to tray");
+            log::debug!("Menu rebuilt and applied to tray");
         }
 
         Ok(())

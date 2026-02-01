@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager, Runtime};
 
 use crate::state::SharedState;
 use crate::tray::TrayManager;
-use crate::types::{ConnectionStatus, NowPlayingData, SidecarMessage, Zone};
+use crate::types::{ConnectionStatus, NowPlayingData, SidecarMessage, Zone, ZonePreference};
 use std::time::Instant;
 
 /// Manages the Node.js sidecar process
@@ -247,7 +247,7 @@ impl SidecarManager {
                 state: playback_state,
                 artwork,
             } => {
-                log::info!("Now playing in zone {}: {} - {} ({:?})", zone_id, title, artist, playback_state);
+                log::debug!("Now playing in zone {}: {} - {} ({:?})", zone_id, title, artist, playback_state);
 
                 // Update app state
                 let track_data = NowPlayingData {
@@ -258,29 +258,47 @@ impl SidecarManager {
                     artwork,
                 };
 
-                // Update state
-                {
+                // Update state - only update current_track if this is the selected zone
+                let should_update_icon = {
                     let mut state_guard = state.write();
-                    state_guard.current_track = Some(track_data.clone());
 
-                    // Also update the specific zone's now_playing data
+                    // Always update the specific zone's now_playing data
                     if let Some(zone) = state_guard.all_zones.iter_mut().find(|z| z.zone_id == zone_id) {
-                        zone.now_playing = Some(track_data);
+                        zone.now_playing = Some(track_data.clone());
                         zone.state_changed_at = Instant::now();
                     }
-                }
 
-                // Update tray icon (state is now guaranteed to be updated)
-                TrayManager::update_icon(app, state.clone())?;
+                    // Check if this zone is the one we should display
+                    let is_selected_zone = match &state_guard.zone_preference {
+                        ZonePreference::Auto => {
+                            // In Auto mode, show the first playing zone or this one if none selected
+                            state_guard.active_zone_id.as_ref() == Some(&zone_id) ||
+                            state_guard.active_zone_id.is_none()
+                        }
+                        ZonePreference::Selected { zone_id: selected_id, .. } => {
+                            selected_id == &zone_id
+                        }
+                    };
+
+                    if is_selected_zone {
+                        state_guard.current_track = Some(track_data);
+                        state_guard.active_zone_id = Some(zone_id.clone());
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                // Only update tray icon if this was the selected zone
+                if should_update_icon {
+                    TrayManager::update_icon(app, state.clone())?;
+                }
             }
             SidecarMessage::ZoneList { zones } => {
-                log::warn!(">>> ZONE_LIST received: {} zones", zones.len());
-                for z in &zones {
-                    log::warn!("    - {} ({}): {:?}", z.display_name, z.zone_id, z.state);
-                }
+                log::debug!("Zone list received: {} zones", zones.len());
 
                 // Compute derived values while holding the lock
-                let (zones_changed, is_initial_load, new_zones_count, needs_rebuild) = {
+                let (zones_changed, new_zones_count, needs_rebuild) = {
                     let mut state_guard = state.write();
 
                     // Capture old zone count for initial load detection
@@ -315,74 +333,47 @@ impl SidecarManager {
                     // Check if zones actually changed (to avoid unnecessary rebuilds)
                     let zones_changed = Self::zones_changed(&state_guard.all_zones, &new_zones);
 
-                    // Check if this is the initial zone load BEFORE updating state
-                    let is_initial_load = old_zones_count == 0 && !new_zones.is_empty();
                     let new_zones_count = new_zones.len();
 
-                    log::warn!("!!! zones_changed={}, is_initial_load={}, old_count={}, new_count={}",
-                        zones_changed, is_initial_load, old_zones_count, new_zones_count);
+                    log::debug!("zones_changed={}, old_count={}, new_count={}",
+                        zones_changed, old_zones_count, new_zones_count);
 
                     state_guard.all_zones = new_zones;
 
-                    if zones_changed {
-                        log::warn!("!!! ZONES CHANGED - updating state");
-                        for zone in &state_guard.all_zones {
-                            log::warn!("    Zone: {} ({}): {:?}", zone.display_name, zone.zone_id, zone.state);
-                        }
-                    } else {
-                        log::warn!("!!! ZONES NOT CHANGED - no state update");
-                    }
-
                     // Determine if we need to rebuild the menu
-                    let needs_rebuild = if is_initial_load {
-                        // Skip rebuild for the very first zone load to prevent menu closing on first interaction
-                        log::warn!("!!! INITIAL LOAD: Skipping rebuild (0 → {})", new_zones_count);
-                        log::warn!("!!! Setting needs_menu_rebuild flag for next update");
-                        state_guard.needs_menu_rebuild = true;
-                        false // Don't rebuild now
-                    } else {
-                        let force_rebuild = state_guard.needs_menu_rebuild;
+                    // Only rebuild if zones actually changed AND enough time has passed (debounce)
+                    let needs_rebuild = if zones_changed {
+                        let should_rebuild = match state_guard.last_menu_rebuild {
+                            None => true,
+                            Some(last_rebuild) => last_rebuild.elapsed().as_secs() >= 1,
+                        };
 
-                        if force_rebuild {
-                            log::warn!("!!! FORCED REBUILD: needs_menu_rebuild flag is set");
+                        if should_rebuild {
+                            log::debug!("Zones changed, rebuilding menu");
                             true
-                        } else if zones_changed {
-                            // Zones actually changed - check debounce
-                            let should_rebuild = match state_guard.last_menu_rebuild {
-                                None => true,
-                                Some(last_rebuild) => last_rebuild.elapsed().as_secs() >= 1,
-                            };
-
-                            if should_rebuild {
-                                log::warn!("!!! ZONES CHANGED: Rebuilding menu");
-                                true
-                            } else {
-                                log::warn!("!!! ZONES CHANGED but debounced (too soon)");
-                                false
-                            }
                         } else {
-                            log::warn!("!!! ZONES NOT CHANGED - no rebuild needed");
+                            log::debug!("Zones changed but debounced (too soon)");
                             false
                         }
+                    } else {
+                        false
                     };
 
-                    (zones_changed, is_initial_load, new_zones_count, needs_rebuild)
+                    (zones_changed, new_zones_count, needs_rebuild)
                 };
 
                 if needs_rebuild {
-                    log::warn!("╔═══ EXECUTING REBUILD ═══");
+                    log::debug!("Rebuilding menu after zone change");
                     if let Err(e) = TrayManager::rebuild_menu(app, state) {
                         log::error!("Failed to rebuild menu: {}", e);
                     } else {
                         let mut state_guard = state.write();
                         state_guard.last_menu_rebuild = Some(Instant::now());
-                        state_guard.needs_menu_rebuild = false; // Clear the flag
-                        log::warn!("╚═══ REBUILD COMPLETE ═══");
                     }
                 }
 
                 // Suppress unused variable warnings
-                let _ = (zones_changed, is_initial_load, new_zones_count);
+                let _ = (zones_changed, new_zones_count);
             }
             SidecarMessage::Status { state: status_str, message } => {
                 log::info!("Sidecar status: {} - {:?}", status_str, message);
