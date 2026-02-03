@@ -203,12 +203,16 @@ export class TransportManager {
           output.info('✓ Successfully subscribed to zones');
           output.info(`Initial zones count: ${(data.zones || []).length}`);
           // Initial zone data
-          this.handleZonesUpdate(data);
+          this.handleZonesUpdate(data).catch(err => {
+            output.error('Error handling initial zones update:', err);
+          });
         } else if (response === 'Changed') {
           output.info('Zone state changed');
           output.info(`Changed zones count: ${(data.zones_changed || []).length}`);
           // Zone state changed
-          this.handleZonesUpdate(data);
+          this.handleZonesUpdate(data).catch(err => {
+            output.error('Error handling zones change:', err);
+          });
         } else if (response === 'NetworkError' || response === 'ConnectionError') {
           output.warn(`Connection error: ${response}`);
           output.emitStatus('disconnected', 'Lost connection to Roon Core');

@@ -47,6 +47,19 @@ function main(): void {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
+  // Exit when parent process dies (stdin closes)
+  // This prevents orphaned processes when the Rust app is killed abruptly
+  process.stdin.on('end', () => {
+    output.info('Parent process closed stdin, shutting down...');
+    shutdown();
+  });
+  process.stdin.on('close', () => {
+    output.info('Parent process closed stdin, shutting down...');
+    shutdown();
+  });
+  // Resume stdin so the 'end' event fires when parent dies
+  process.stdin.resume();
+
   // Handle uncaught errors
   process.on('uncaughtException', (error) => {
     output.error('Uncaught exception:', error);

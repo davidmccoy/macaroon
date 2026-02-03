@@ -10,9 +10,9 @@
     "bundle": "npm run build && pkg build/index.js --targets node18-macos-arm64 --output ../src-tauri/binaries/roon-sidecar-aarch64-apple-darwin"
   },
   "dependencies": {
-    "node-roon-api": "github:roonlabs/node-roon-api",
-    "node-roon-api-transport": "github:roonlabs/node-roon-api-transport",
-    "node-roon-api-image": "github:roonlabs/node-roon-api-image"
+    "node-roon-api": "github:davidmccoy/node-roon-api#security/replace-ip-dependency",
+    "node-roon-api-transport": "github:roonlabs/node-roon-api-transport#2ee60008a4cdb90c34ff3de58bb4b949067f1d20",
+    "node-roon-api-image": "github:roonlabs/node-roon-api-image#a5f0efaf2dfb5457e91abe326c3a40d865131d32"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

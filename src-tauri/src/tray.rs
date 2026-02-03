@@ -8,29 +8,33 @@ use tauri::{
 
 use crate::compositor::Compositor;
 use crate::state::SharedState;
-use crate::types::{PlaybackState, ZonePreference};
+use crate::types::{ConnectionStatus, PlaybackState, ZonePreference};
 
+/// TrayManager is stored as a singleton in Tauri's app state.
+/// It owns the Compositor which loads the font once at startup.
 pub struct TrayManager {
     compositor: Compositor,
 }
 
 impl TrayManager {
+    /// Create a new TrayManager. This should only be called once during app setup.
+    /// If the font fails to load, returns an error that should terminate the app.
     pub fn new() -> Result<Self> {
-        let compositor = Compositor::new()?;
+        let compositor = Compositor::new()
+            .context("Failed to initialize compositor - font may be missing")?;
         Ok(Self { compositor })
     }
 
-    /// Initialize the system tray
+    /// Initialize the system tray and store TrayManager as app state
     pub fn setup<R: Runtime>(app: &AppHandle<R>, state: SharedState) -> Result<()> {
-        // Don't set last_menu_rebuild here - let it be None so the first
-        // zone update will trigger a rebuild immediately
-
-        // Create initial menu (will show "no zones" until sidecar sends zones)
-        let menu = Self::build_menu(app, &state)?;
-
-        // Create initial tray icon
+        // Create the TrayManager singleton - exit if font loading fails
         let manager = TrayManager::new()?;
-        let initial_icon = manager.create_initial_icon()?;
+
+        // Create initial menu
+        let menu = Self::build_menu_internal(app, &state)?;
+
+        // Create initial icon
+        let initial_icon = manager.create_placeholder_icon()?;
 
         // Clone state for menu event handler
         let state_for_menu = state.clone();
@@ -44,8 +48,11 @@ impl TrayManager {
             })
             .build(app)?;
 
-        // Store tray in app state for later updates
+        // Store tray icon in app state
         app.manage(tray);
+
+        // Store TrayManager singleton in app state
+        app.manage(manager);
 
         // Store shared state
         app.manage(state);
@@ -53,71 +60,44 @@ impl TrayManager {
         Ok(())
     }
 
-    /// Build the tray menu with zones directly in menu (for rebuild)
-    fn build_menu_for_rebuild<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<Menu<R>> {
+    /// Build the tray menu with zones and status
+    fn build_menu_internal<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<Menu<R>> {
         let state_guard = state.read();
-
-        log::debug!("Rebuilding menu with {} zones", state_guard.all_zones.len());
-
         let menu = Menu::new(app)?;
 
-        // Add zone items directly to menu
-        if state_guard.all_zones.is_empty() {
-            let no_zones = MenuItem::with_id(app, "no_zones", "No zones available", false, None::<&str>)?;
-            menu.append(&no_zones)?;
-        } else {
-            for zone in &state_guard.all_zones {
-                let is_preferred = match &state_guard.zone_preference {
-                    ZonePreference::Selected { zone_id, .. } => zone_id == &zone.zone_id,
-                    ZonePreference::Auto => false,
-                };
-
-                let state_str = match zone.state {
-                    PlaybackState::Playing => "Playing",
-                    PlaybackState::Paused => "Paused",
-                    PlaybackState::Stopped => "Stopped",
-                    PlaybackState::Loading => "Loading",
-                };
-
-                let label = format!("{} ({})", zone.display_name, state_str);
-
-                let item = CheckMenuItem::with_id(
-                    app,
-                    &zone.zone_id,
-                    label,
-                    true,
-                    is_preferred,
-                    None::<&str>,
-                )?;
+        // Show connection status if not connected
+        match &state_guard.connection_status {
+            ConnectionStatus::Disconnected => {
+                let item = MenuItem::with_id(app, "status", "Disconnected from Roon", false, None::<&str>)?;
                 menu.append(&item)?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                menu.append(&separator)?;
+            }
+            ConnectionStatus::Discovering => {
+                let item = MenuItem::with_id(app, "status", "Searching for Roon Core...", false, None::<&str>)?;
+                menu.append(&item)?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                menu.append(&separator)?;
+            }
+            ConnectionStatus::Error(msg) => {
+                let label = format!("Error: {}", msg);
+                let item = MenuItem::with_id(app, "status", &label, false, None::<&str>)?;
+                menu.append(&item)?;
+                let separator = PredefinedMenuItem::separator(app)?;
+                menu.append(&separator)?;
+            }
+            ConnectionStatus::Connected => {
+                // Connected - show zones below
             }
         }
 
-        // Separator and quit
-        let separator = PredefinedMenuItem::separator(app)?;
-        menu.append(&separator)?;
-
-        let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-        menu.append(&quit_item)?;
-
-        Ok(menu)
-    }
-
-    /// Build the tray menu with zones directly in menu (for initial setup)
-    fn build_menu<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<Menu<R>> {
-        let state_guard = state.read();
-
-        log::info!("Building menu with {} zones", state_guard.all_zones.len());
-
-        let menu = Menu::new(app)?;
-
-        // Add zone items directly to menu
+        // Add zone items
         if state_guard.all_zones.is_empty() {
             let no_zones = MenuItem::with_id(app, "no_zones", "No zones available", false, None::<&str>)?;
             menu.append(&no_zones)?;
         } else {
             for zone in &state_guard.all_zones {
-                let is_preferred = match &state_guard.zone_preference {
+                let is_selected = match &state_guard.zone_preference {
                     ZonePreference::Selected { zone_id, .. } => zone_id == &zone.zone_id,
                     ZonePreference::Auto => false,
                 };
@@ -136,7 +116,7 @@ impl TrayManager {
                     &zone.zone_id,
                     label,
                     true,
-                    is_preferred,
+                    is_selected,
                     None::<&str>,
                 )?;
                 menu.append(&item)?;
@@ -165,59 +145,54 @@ impl TrayManager {
             "quit" => {
                 app.exit(0);
             }
-            "no_zones" => {
-                // Disabled item, do nothing
+            "no_zones" | "status" => {
+                // Disabled items, do nothing
             }
             zone_id => {
-                // This is a zone selection
+                // Zone selection
                 log::info!("Zone selected: {}", zone_id);
 
-                // Update zone preference and load selected zone's track
                 {
                     let mut state_guard = state.write();
                     state_guard.zone_preference = ZonePreference::Selected {
                         zone_id: zone_id.to_string(),
-                        smart_switching: true,  // Default enabled
-                        grace_period_mins: 5,   // Default 5 minutes
+                        smart_switching: true,
+                        grace_period_mins: 5,
                     };
 
                     // Reset smart-switch state since user explicitly selected a zone
                     state_guard.is_smart_switched = false;
                     state_guard.preferred_zone_stopped_at = None;
 
-                    // Load the selected zone's now_playing data as current_track
-                    // Clone data first to avoid borrow issues
+                    // Load the selected zone's now_playing data
                     let zone_data = state_guard.all_zones.iter()
                         .find(|z| z.zone_id == zone_id)
                         .map(|z| (z.now_playing.clone(), z.display_name.clone()));
 
                     if let Some((now_playing, display_name)) = zone_data {
-                        state_guard.current_track = now_playing;
+                        // Only update current_track if the zone has data
+                        // Keep existing track if zone is playing but data hasn't arrived yet
+                        if now_playing.is_some() {
+                            state_guard.current_track = now_playing;
+                        }
+                        // Always update active zone ID - the track data will arrive shortly
                         state_guard.active_zone_id = Some(zone_id.to_string());
-                        log::info!("Loaded track from zone: {}", display_name);
+                        log::info!("Selected zone: {}", display_name);
                     } else {
-                        // Zone not found (might be an output:xxx synthetic zone)
-                        state_guard.current_track = None;
+                        // Zone doesn't exist in our list - this shouldn't normally happen
+                        // Keep existing track to avoid flicker
                         state_guard.active_zone_id = Some(zone_id.to_string());
-                        log::info!("Zone not found, cleared current track");
+                        log::warn!("Selected zone not found in zone list: {}", zone_id);
                     }
 
-                    log::info!("Zone preference updated to: {}", zone_id);
-                }
-
-                // Rebuild menu to show checkmark on selected zone
-                if let Err(e) = Self::rebuild_menu(app, state) {
-                    log::error!("Failed to rebuild menu: {}", e);
-                }
-
-                // Update last rebuild time
-                {
-                    let mut state_guard = state.write();
                     state_guard.last_menu_rebuild = Some(std::time::Instant::now());
                 }
 
-                // Update tray icon to display the selected zone
-                if let Err(e) = Self::update_icon(app, state.clone()) {
+                // Rebuild menu and update icon
+                if let Err(e) = Self::rebuild_menu(app, state) {
+                    log::error!("Failed to rebuild menu: {}", e);
+                }
+                if let Err(e) = Self::update_icon(app, state) {
                     log::error!("Failed to update icon after zone selection: {}", e);
                 }
             }
@@ -226,153 +201,68 @@ impl TrayManager {
 
     /// Rebuild the tray menu (called when zones change or preference changes)
     pub fn rebuild_menu<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<()> {
-        let new_menu = Self::build_menu_for_rebuild(app, state)?;
+        let new_menu = Self::build_menu_internal(app, state)?;
 
-        if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
+        if let Some(tray) = app.try_state::<tauri::tray::TrayIcon<R>>() {
             tray.set_menu(Some(new_menu))?;
         }
 
         Ok(())
     }
 
-    /// Create an initial placeholder icon
-    fn create_initial_icon(&self) -> Result<Image> {
-        let icon_bytes = self.compositor.create_menu_bar_icon(
-            None,  // No artwork - will show placeholder
-            "",    // No title
-            "",    // No artist
-        )?;
-
-        Image::from_bytes(&icon_bytes)
-            .context("Failed to create image from bytes")
+    /// Create a placeholder icon (no track playing)
+    fn create_placeholder_icon(&self) -> Result<Image<'static>> {
+        let icon_bytes = self.compositor.create_menu_bar_icon(None, "", "")?;
+        Image::from_bytes(&icon_bytes).context("Failed to create placeholder icon")
     }
 
-    /// Update the tray icon with current track info
-    pub fn update_icon<R: Runtime>(
-        app: &AppHandle<R>,
-        state: SharedState,
-    ) -> Result<()> {
-        let manager = TrayManager::new()?;
+    /// Check if dark mode has changed and return true if icon needs updating
+    fn check_dark_mode_changed(state: &SharedState) -> bool {
+        let current_dark_mode = matches!(dark_light::detect(), dark_light::Mode::Dark);
+        let mut state_guard = state.write();
+        let changed = state_guard.last_dark_mode != Some(current_dark_mode);
+        if changed {
+            state_guard.last_dark_mode = Some(current_dark_mode);
+            log::info!("System appearance changed to {} mode", if current_dark_mode { "dark" } else { "light" });
+        }
+        changed
+    }
 
-        // Read current state
+    /// Update the tray icon with current track info.
+    /// Uses the TrayManager singleton stored in app state.
+    /// Also checks for dark mode changes and re-renders if needed.
+    pub fn update_icon<R: Runtime>(app: &AppHandle<R>, state: &SharedState) -> Result<()> {
+        // Check if dark mode changed - this updates state.last_dark_mode
+        let _ = Self::check_dark_mode_changed(state);
+
+        let manager = app.try_state::<TrayManager>()
+            .context("TrayManager not found in app state")?;
+
         let state_guard = state.read();
 
-        if let Some(track) = &state_guard.current_track {
-            match track.state {
-                PlaybackState::Playing => {
-                    // Show track info with artwork when playing
-                    let icon_bytes = manager.compositor.create_menu_bar_icon(
-                        track.artwork.as_deref(),
-                        &track.title,
-                        &track.artist,
-                    ).unwrap_or_else(|e| {
-                        log::error!("Failed to create icon: {}, using fallback", e);
-                        manager.create_fallback_icon()
-                            .expect("Fallback icon creation should never fail")
-                    });
-
-                    let image = Image::from_bytes(&icon_bytes)
-                        .context("Failed to create image from bytes")?;
-
-                    if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
-                        tray.set_icon(Some(image))?;
-                    }
-                }
-                PlaybackState::Paused => {
-                    // Show just placeholder image with no text when paused
-                    let icon_bytes = manager.compositor.create_menu_bar_icon(
-                        None,  // No artwork - will show purple placeholder
-                        "",    // No title
-                        "",    // No artist
-                    ).unwrap_or_else(|e| {
-                        log::error!("Failed to create paused icon: {}, using fallback", e);
-                        manager.create_fallback_icon()
-                            .expect("Fallback icon creation should never fail")
-                    });
-
-                    let image = Image::from_bytes(&icon_bytes)
-                        .context("Failed to create image from bytes")?;
-
-                    if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
-                        tray.set_icon(Some(image))?;
-                    }
-                }
-                PlaybackState::Loading => {
-                    // Show loading state (similar to paused for now)
-                    let icon_bytes = manager.compositor.create_menu_bar_icon(
-                        None,  // No artwork - will show purple placeholder
-                        "Loading...",
-                        "",
-                    ).unwrap_or_else(|e| {
-                        log::error!("Failed to create loading icon: {}, using fallback", e);
-                        manager.create_fallback_icon()
-                            .expect("Fallback icon creation should never fail")
-                    });
-
-                    let image = Image::from_bytes(&icon_bytes)
-                        .context("Failed to create image from bytes")?;
-
-                    if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
-                        tray.set_icon(Some(image))?;
-                    }
-                }
-                PlaybackState::Stopped => {
-                    // Show placeholder when stopped (same as paused)
-                    let icon_bytes = manager.compositor.create_menu_bar_icon(
-                        None,  // No artwork - will show purple placeholder
-                        "",    // No title
-                        "",    // No artist
-                    ).unwrap_or_else(|e| {
-                        log::error!("Failed to create stopped icon: {}, using fallback", e);
-                        manager.create_fallback_icon()
-                            .expect("Fallback icon creation should never fail")
-                    });
-
-                    let image = Image::from_bytes(&icon_bytes)
-                        .context("Failed to create image from bytes")?;
-
-                    if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
-                        tray.set_icon(Some(image))?;
-                    }
-                }
+        let icon_bytes = match &state_guard.current_track {
+            Some(track) if track.state == PlaybackState::Playing => {
+                // Show track info with artwork when playing
+                manager.compositor.create_menu_bar_icon(
+                    track.artwork.as_deref(),
+                    &track.title,
+                    &track.artist,
+                )?
             }
-        }
-
-        Ok(())
-    }
-
-    /// Create a fallback icon when normal icon generation fails
-    fn create_fallback_icon(&self) -> Result<Vec<u8>> {
-        // Create minimal icon with music note symbol
-        self.compositor.create_menu_bar_icon(
-            None,
-            "♪",  // Music note symbol
-            "",
-        )
-    }
-
-    /// Update icon with test data (for Phase 0 development)
-    pub fn update_test_icon<R: Runtime>(
-        app: &AppHandle<R>,
-        title: &str,
-        artist: &str,
-    ) -> Result<()> {
-        let manager = TrayManager::new()?;
-
-        let icon_bytes = manager.compositor.create_menu_bar_icon(
-            None,
-            title,
-            artist,
-        ).unwrap_or_else(|e| {
-            log::error!("Failed to create test icon: {}, using fallback", e);
-            manager.create_fallback_icon()
-                .expect("Fallback icon creation should never fail")
-        });
+            Some(track) if track.state == PlaybackState::Loading => {
+                // Show loading text
+                manager.compositor.create_menu_bar_icon(None, "Loading...", "")?
+            }
+            _ => {
+                // Paused, stopped, or no track - show placeholder
+                manager.compositor.create_menu_bar_icon(None, "", "")?
+            }
+        };
 
         let image = Image::from_bytes(&icon_bytes)
             .context("Failed to create image from bytes")?;
 
-        if let Some(tray) = app.try_state::<tauri::tray::TrayIcon>() {
+        if let Some(tray) = app.try_state::<tauri::tray::TrayIcon<R>>() {
             tray.set_icon(Some(image))?;
         }
 

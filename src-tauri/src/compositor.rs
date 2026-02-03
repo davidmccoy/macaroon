@@ -1,50 +1,22 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use image::{Rgba, RgbaImage};
 use imageproc::drawing::draw_text_mut;
-use ab_glyph::{FontRef, PxScale};
+use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 
-/// Detect if macOS is in dark mode using defaults command (safer than Cocoa APIs)
-#[cfg(target_os = "macos")]
-fn is_dark_mode() -> bool {
-    use std::process::Command;
-
-    // Use the `defaults read` command to check system appearance
-    // This is safer than calling Cocoa APIs directly
-    match Command::new("defaults")
-        .args(&["read", "-g", "AppleInterfaceStyle"])
-        .output()
-    {
-        Ok(output) => {
-            let result = String::from_utf8_lossy(&output.stdout);
-            let is_dark = result.trim() == "Dark";
-            log::debug!("Dark mode detection (via defaults): {}", is_dark);
-            is_dark
-        }
-        Err(e) => {
-            // If the command fails (e.g., key doesn't exist in light mode), assume light mode
-            log::debug!("Dark mode detection failed: {}, assuming light mode", e);
-            false
-        }
-    }
-}
-
-/// Default to light mode on non-macOS platforms
-#[cfg(not(target_os = "macos"))]
-fn is_dark_mode() -> bool {
-    false
-}
+/// Maximum dimensions for decoded images (prevent OOM attacks)
+const MAX_IMAGE_DIMENSION: u32 = 4096;
 
 /// Get appropriate text color based on system appearance
+/// Uses the dark-light crate which properly caches and uses native APIs
 fn get_text_color() -> Rgba<u8> {
-    if is_dark_mode() {
-        Rgba([255, 255, 255, 255]) // White text for dark mode
-    } else {
-        Rgba([0, 0, 0, 255]) // Black text for light mode
+    match dark_light::detect() {
+        dark_light::Mode::Dark => Rgba([255, 255, 255, 255]), // White text for dark mode
+        dark_light::Mode::Light | dark_light::Mode::Default => Rgba([0, 0, 0, 255]), // Black text for light mode
     }
 }
 
 pub struct Compositor {
-    font: Vec<u8>,
+    font: FontVec,
 }
 
 impl Compositor {
@@ -56,13 +28,39 @@ impl Compositor {
         let font_data = std::fs::read(font_path)
             .context("Failed to load SF Pro system font. Ensure running on macOS.")?;
 
-        Ok(Self { font: font_data })
+        // Parse font once at construction time, cache for reuse
+        let font = FontVec::try_from_vec(font_data)
+            .map_err(|_| anyhow!("Failed to parse SF Pro font data"))?;
+
+        Ok(Self { font })
     }
 
     /// Extract the primary (first) artist from a potentially multi-artist string
     /// Roon sends multiple artists separated by " / ", but we only want to show the first
     fn get_primary_artist(artist: &str) -> &str {
-        artist.split(" / ").next().unwrap_or(artist)
+        let first = artist.split(" / ").next().unwrap_or(artist);
+        // Handle edge case where artist is " / Something" or just " / "
+        let trimmed = first.trim();
+        if trimmed.is_empty() {
+            // Try to get the second part if first was empty
+            artist.split(" / ").nth(1).map(str::trim).filter(|s| !s.is_empty()).unwrap_or(artist.trim())
+        } else {
+            trimmed
+        }
+    }
+
+    /// Format display text from title and artist, handling empty cases
+    fn format_display_text(title: &str, artist: &str) -> String {
+        let primary_artist = Self::get_primary_artist(artist);
+        let title_trimmed = title.trim();
+        let artist_trimmed = primary_artist.trim();
+
+        match (title_trimmed.is_empty(), artist_trimmed.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => artist_trimmed.to_string(),
+            (false, true) => title_trimmed.to_string(),
+            (false, false) => format!("{} - {}", title_trimmed, artist_trimmed),
+        }
     }
 
     /// Create a menu bar icon with album art and text
@@ -73,20 +71,27 @@ impl Compositor {
         title: &str,
         artist: &str,
     ) -> Result<Vec<u8>> {
-        // Render at 3x resolution for Retina displays for sharper text
+        // Render at 3x resolution for sharp Retina text
         const SCALE_FACTOR: u32 = 3;
+        // Menu bar height is 22pt
+        const MENU_BAR_HEIGHT_PT: u32 = 22;
         const MAX_CANVAS_WIDTH: u32 = 500 * SCALE_FACTOR;
-        const MIN_CANVAS_WIDTH: u32 = 22 * SCALE_FACTOR;  // Just artwork
-        const CANVAS_HEIGHT: u32 = 22 * SCALE_FACTOR;
-        const ALBUM_ART_SIZE: u32 = 22 * SCALE_FACTOR;
-        const TEXT_X_OFFSET: i32 = 32 * SCALE_FACTOR as i32;  // Album art ends at 22, text starts at 32 (10pt gap)
-        const RIGHT_PADDING: u32 = 3 * SCALE_FACTOR;  // Small buffer for glyph overhang
+        const MIN_CANVAS_WIDTH: u32 = MENU_BAR_HEIGHT_PT * SCALE_FACTOR;
+        const CANVAS_HEIGHT: u32 = MENU_BAR_HEIGHT_PT * SCALE_FACTOR;
+        const ALBUM_ART_SIZE: u32 = MENU_BAR_HEIGHT_PT * SCALE_FACTOR;
+        // Gap between album art and text: 10pt
+        const TEXT_GAP_PT: u32 = 10;
+        const TEXT_X_OFFSET: i32 = ((MENU_BAR_HEIGHT_PT + TEXT_GAP_PT) * SCALE_FACTOR) as i32;
+        const RIGHT_PADDING: u32 = 3 * SCALE_FACTOR; // Small buffer for glyph overhang
+        // Font size: 21pt at 3x = 63px (original size)
+        const FONT_SIZE_PX: f32 = 63.0;
+
+        // Format display text handling empty title/artist properly
+        let text = Self::format_display_text(title, artist);
 
         // Calculate dynamic canvas width based on text length
-        let canvas_width = if !title.is_empty() || !artist.is_empty() {
-            let primary_artist = Self::get_primary_artist(artist);
-            let text = format!("{} - {}", title, primary_artist);
-            let scale = PxScale::from(63.0);
+        let canvas_width = if !text.is_empty() {
+            let scale = PxScale::from(FONT_SIZE_PX);
             let text_width = self.measure_text_width(&text, scale);
 
             // Width = album art + spacing + text + padding
@@ -127,36 +132,25 @@ impl Compositor {
             self.draw_placeholder_art(&mut canvas, ALBUM_ART_SIZE);
         }
 
-        // Only draw text if we have title or artist
-        if !title.is_empty() || !artist.is_empty() {
-            // Prepare text: "Title - Artist" (using primary artist only to avoid truncation)
-            let primary_artist = Self::get_primary_artist(artist);
-            let text = format!("{} - {}", title, primary_artist);
+        // Only draw text if we have something to display
+        if !text.is_empty() {
             let available_width = (canvas_width - TEXT_X_OFFSET as u32 - RIGHT_PADDING) as i32;
-            let display_text = self.truncate_text(&text, available_width);
-
-            // Draw text at 3x scale for Retina
-            // 63px at 3x = 21px at 1x - matching original Helvetica Neue size
-            let scale = PxScale::from(63.0);
+            let scale = PxScale::from(FONT_SIZE_PX);
+            let display_text = self.truncate_text(&text, available_width, scale);
 
             // Get text color based on macOS appearance (dark/light mode)
             let text_color = get_text_color();
 
-            // Load font for rendering
-            let font = FontRef::try_from_slice(&self.font)
-                .context("Failed to parse font data")?;
-
-            // Position text vertically - scaled for 3x resolution
-            // At 3x: 3px offset = 1px at 1x (matching original positioning)
-            let text_y = 3;
+            // Position text vertically - small offset from top at 3x scale
+            const TEXT_Y_OFFSET: i32 = 3;
 
             draw_text_mut(
                 &mut canvas,
                 text_color,
                 TEXT_X_OFFSET,
-                text_y,
+                TEXT_Y_OFFSET,
                 scale,
-                &font,
+                &self.font,
                 &display_text,
             );
         }
@@ -177,17 +171,32 @@ impl Compositor {
             artwork_data
         };
 
+        // Check for empty base64 data
+        if base64_data.trim().is_empty() {
+            return Err(anyhow!("Empty base64 data in artwork"));
+        }
+
         // Decode base64
         use base64::Engine;
         let image_bytes = base64::engine::general_purpose::STANDARD
             .decode(base64_data)
             .context("Failed to decode base64 artwork")?;
 
-        // Load and resize image
+        // Load image
         let img = image::load_from_memory(&image_bytes)
             .context("Failed to load image from memory")?;
 
-        let resized = img.resize_exact(size, size, image::imageops::FilterType::Lanczos3);
+        // Validate image dimensions to prevent OOM attacks
+        if img.width() > MAX_IMAGE_DIMENSION || img.height() > MAX_IMAGE_DIMENSION {
+            return Err(anyhow!(
+                "Image dimensions {}x{} exceed maximum allowed {}x{}",
+                img.width(), img.height(), MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION
+            ));
+        }
+
+        // Resize using Triangle filter (bilinear) - faster than Lanczos3 and
+        // quality difference is imperceptible at 22x22 target size
+        let resized = img.resize_exact(size, size, image::imageops::FilterType::Triangle);
 
         Ok(resized.to_rgba8())
     }
@@ -210,55 +219,66 @@ impl Compositor {
     }
 
     /// Truncate text to fit within available width
-    fn truncate_text(&self, text: &str, max_width: i32) -> String {
-        // Use same scale as rendering (63px at 3x = 21px at 1x)
-        let scale = PxScale::from(63.0);
+    /// Uses O(n) algorithm by measuring individual glyph advances
+    fn truncate_text(&self, text: &str, max_width: i32, scale: PxScale) -> String {
+        let scaled_font = self.font.as_scaled(scale);
 
-        // Measure full text width
-        let full_width = self.measure_text_width(text, scale);
+        // First pass: measure full text width
+        let full_width: f32 = text.chars()
+            .map(|ch| scaled_font.h_advance(self.font.glyph_id(ch)))
+            .sum();
 
         if full_width <= max_width as f32 {
             return text.to_string();
         }
 
-        // Truncate with ellipsis
+        // Calculate ellipsis width
         let ellipsis = "...";
-        let ellipsis_width = self.measure_text_width(ellipsis, scale);
-        let available_for_text = max_width as f32 - ellipsis_width;
+        let ellipsis_width: f32 = ellipsis.chars()
+            .map(|ch| scaled_font.h_advance(self.font.glyph_id(ch)))
+            .sum();
 
+        // Add small safety margin for glyph overhang
+        let available_for_text = (max_width as f32 - ellipsis_width - 2.0).max(0.0);
+
+        // If even ellipsis doesn't fit, return empty string
+        if available_for_text <= 0.0 {
+            return String::new();
+        }
+
+        // Second pass: truncate incrementally (O(n) - measure each char once)
         let mut truncated = String::new();
-        for ch in text.chars() {
-            let test_str = format!("{}{}", truncated, ch);
-            let width = self.measure_text_width(&test_str, scale);
+        let mut current_width = 0.0;
 
-            if width > available_for_text {
+        for ch in text.chars() {
+            let glyph_id = self.font.glyph_id(ch);
+            let char_width = scaled_font.h_advance(glyph_id);
+
+            if current_width + char_width > available_for_text {
                 break;
             }
+
+            current_width += char_width;
             truncated.push(ch);
         }
 
-        format!("{}{}", truncated, ellipsis)
+        // Only add ellipsis if we actually truncated something
+        if truncated.len() < text.len() && !truncated.is_empty() {
+            format!("{}{}", truncated, ellipsis)
+        } else if truncated.is_empty() {
+            ellipsis.to_string()
+        } else {
+            truncated
+        }
     }
 
     /// Measure the width of text in pixels
     fn measure_text_width(&self, text: &str, scale: PxScale) -> f32 {
-        use ab_glyph::{Font, ScaleFont};
+        let scaled_font = self.font.as_scaled(scale);
 
-        // Parse font for measurement
-        let font = match FontRef::try_from_slice(&self.font) {
-            Ok(f) => f,
-            Err(_) => return 0.0,
-        };
-
-        let scaled_font = font.as_scaled(scale);
-        let mut width = 0.0;
-
-        for ch in text.chars() {
-            let glyph_id = font.glyph_id(ch);
-            width += scaled_font.h_advance(glyph_id);
-        }
-
-        width
+        text.chars()
+            .map(|ch| scaled_font.h_advance(self.font.glyph_id(ch)))
+            .sum()
     }
 
     /// Encode image as PNG bytes
@@ -282,12 +302,13 @@ impl Compositor {
     }
 }
 
-/// Create a test icon with fake data (for Phase 0 testing)
+/// Create a test icon with fake data (for development testing)
+#[allow(dead_code)]
 pub fn create_test_icon() -> Result<Vec<u8>> {
     let compositor = Compositor::new()?;
 
     compositor.create_menu_bar_icon(
-        None, // No artwork for now - will show purple square
+        None, // No artwork - will show purple placeholder
         "Test Song Title",
         "Test Artist Name",
     )

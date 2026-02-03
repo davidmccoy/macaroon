@@ -49,18 +49,36 @@ interface ExtendedRoonApiOptions {
 
 /**
  * Get the config directory path for storing pairing data
+ * Uses ~/Library/Application Support on macOS (standard location)
  */
 function getConfigPath(): string {
   const homeDir = os.homedir();
-  const configDir = path.join(homeDir, '.config', 'now-playing');
+  let configDir: string;
 
-  // Ensure directory exists
+  if (process.platform === 'darwin') {
+    // macOS: use standard Application Support directory
+    configDir = path.join(homeDir, 'Library', 'Application Support', 'Now Playing');
+  } else {
+    // Other platforms: use ~/.config
+    configDir = path.join(homeDir, '.config', 'now-playing');
+  }
+
+  // Ensure directory exists with restrictive permissions (owner only)
   if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true });
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
   }
 
   return path.join(configDir, 'roon-config.json');
 }
+
+/**
+ * Exponential backoff configuration for reconnection attempts
+ */
+const RECONNECT_CONFIG = {
+  initialDelayMs: 1000,    // Start with 1 second
+  maxDelayMs: 60000,       // Cap at 1 minute
+  multiplier: 2,           // Double each time
+};
 
 /**
  * Main Roon client class
@@ -71,6 +89,9 @@ export class RoonClient {
   private transportManager: TransportManager;
   private isAuthorized: boolean = false;
   private currentCore: RoonCore | null = null;
+  private reconnectAttempt: number = 0;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private connectionMonitorInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     this.imageManager = new ImageManager();
@@ -116,7 +137,8 @@ export class RoonClient {
       set_persisted_state: (state: any) => {
         try {
           const configPath = getConfigPath();
-          fs.writeFileSync(configPath, JSON.stringify(state, null, 2));
+          // Write with restrictive permissions (owner read/write only)
+          fs.writeFileSync(configPath, JSON.stringify(state, null, 2), { mode: 0o600 });
           output.debug(`Saved pairing state to ${configPath}`);
         } catch (error) {
           output.error('Failed to save pairing state:', error);
@@ -171,6 +193,9 @@ export class RoonClient {
     this.isAuthorized = true;
     this.currentCore = core;
 
+    // Reset reconnect backoff on successful connection
+    this.reconnectAttempt = 0;
+
     // Emit connected status
     output.emitStatus('connected', `Connected to ${core.display_name}`);
 
@@ -193,8 +218,9 @@ export class RoonClient {
     this.transportManager.clearTransportService();
     this.imageManager.clearImageService();
 
-    // Emit stopped state (no zone_id since disconnected)
-    output.emitNowPlaying('', '', '', '', 'stopped');
+    // Emit stopped state with sentinel zone_id to indicate disconnection
+    // Using a clearly invalid zone_id that Rust can recognize as "no zone"
+    output.emitNowPlaying('__disconnected__', '', '', '', 'stopped');
   }
 
   /**
@@ -243,7 +269,7 @@ export class RoonClient {
 
     // Check for manual host configuration via environment variable
     const roonHost = process.env.ROON_HOST;
-    const roonPort = process.env.ROON_PORT ? parseInt(process.env.ROON_PORT) : 9100;
+    const roonPort = process.env.ROON_PORT ? parseInt(process.env.ROON_PORT, 10) : 9100;
 
     try {
       if (roonHost) {
@@ -260,12 +286,7 @@ export class RoonClient {
             onclose: () => {
               output.warn('WebSocket connection to Roon Core closed');
               output.emitStatus('disconnected', 'Connection to Roon Core lost');
-
-              // Try to reconnect after a delay
-              setTimeout(() => {
-                output.info('Attempting to reconnect...');
-                this.start();
-              }, 5000);
+              this.scheduleReconnect();
             }
           });
 
@@ -274,7 +295,7 @@ export class RoonClient {
         } catch (err) {
           output.error('Error calling ws_connect:', err);
           output.emitError('Failed to connect to Roon Core: ' + (err instanceof Error ? err.message : String(err)));
-          throw err;
+          this.scheduleReconnect();
         }
       } else {
         // Auto-discovery
@@ -304,13 +325,42 @@ export class RoonClient {
    * Monitor connection status periodically
    */
   private startConnectionMonitor(): void {
+    // Avoid creating duplicate intervals
+    if (this.connectionMonitorInterval) {
+      return;
+    }
+
     // Check connection status every 30 seconds
-    setInterval(() => {
+    this.connectionMonitorInterval = setInterval(() => {
       if (!this.isAuthorized && !this.currentCore) {
         // Still discovering
         output.debug('Still searching for Roon Core...');
       }
     }, 30000);
+  }
+
+  /**
+   * Schedule a reconnection attempt with exponential backoff
+   */
+  private scheduleReconnect(): void {
+    // Clear any existing reconnect timer
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+
+    // Calculate delay with exponential backoff
+    const delay = Math.min(
+      RECONNECT_CONFIG.initialDelayMs * Math.pow(RECONNECT_CONFIG.multiplier, this.reconnectAttempt),
+      RECONNECT_CONFIG.maxDelayMs
+    );
+
+    this.reconnectAttempt++;
+    output.info(`Scheduling reconnect attempt ${this.reconnectAttempt} in ${delay}ms`);
+
+    this.reconnectTimer = setTimeout(() => {
+      output.info(`Attempting to reconnect (attempt ${this.reconnectAttempt})...`);
+      this.start();
+    }, delay);
   }
 
   /**
@@ -320,6 +370,18 @@ export class RoonClient {
     output.info('Stopping Roon client...');
 
     try {
+      // Clear any pending reconnect timer
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+
+      // Clear connection monitor interval
+      if (this.connectionMonitorInterval) {
+        clearInterval(this.connectionMonitorInterval);
+        this.connectionMonitorInterval = null;
+      }
+
       // Clean up services
       this.transportManager.clearTransportService();
       this.imageManager.clearImageService();

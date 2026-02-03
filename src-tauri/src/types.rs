@@ -113,6 +113,9 @@ pub struct AppState {
     pub preferred_zone_stopped_at: Option<Instant>,
     pub is_smart_switched: bool,
     pub last_menu_rebuild: Option<Instant>,
+
+    // Track last known dark mode for detecting changes
+    pub last_dark_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +137,7 @@ impl Default for AppState {
             preferred_zone_stopped_at: None,
             is_smart_switched: false,
             last_menu_rebuild: None,
+            last_dark_mode: None,
         }
     }
 }
