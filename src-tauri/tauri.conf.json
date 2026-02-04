@@ -1,7 +1,7 @@
 {
   "productName": "Macaroon",
   "version": "0.1.0",
-  "identifier": "com.macaroon.app",
+  "identifier": "com.macaroon.menubar",
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
